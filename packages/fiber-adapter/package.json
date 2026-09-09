@@ -1,0 +1,14 @@
+{
+  "name": "@fiber-poker/fiber-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Narrow server-side adapter over Fiber Network nodes (FNN v0.9.0 RPC) plus a simulated fiber network for CI.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@noble/hashes": "^1.7.0",
+    "@noble/curves": "^1.9.0"
+  }
+}

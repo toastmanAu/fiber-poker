@@ -1,0 +1,120 @@
+/**
+ * LiquidityManager (docs/04): star-topology directional liquidity means
+ * global table solvency is NOT enough — the table must hold outbound
+ * capacity on EVERY player's channel before a hand starts, because a
+ * winner is unknown until showdown.
+ *
+ * V0 conservative admission rule: before a hand, for every seated player,
+ * guaranteed outbound capacity on that player's channel >= that player's
+ * current stack. Oversized table-side funding is acceptable on devnet.
+ */
+
+import type { FiberGateway, GatewayChannel } from "@fiber-poker/fiber-adapter";
+import type { Shannon } from "@fiber-poker/poker-engine";
+
+export interface PlayerLiquidity {
+  playerId: string;
+  channelId: string | null;
+  localBalance: bigint; // table side: outbound to the player
+  remoteBalance: bigint; // player side: their outbound to the table
+  pendingOutgoing: bigint;
+  usableOutbound: bigint;
+}
+
+export class LiquidityManager {
+  private liquidity = new Map<string, PlayerLiquidity>();
+  private paused = false;
+  private pausedReason = "";
+
+  constructor(private readonly gateway: FiberGateway | null) {}
+
+  /** Refresh per-channel balances from the gateway. */
+  async refresh(players: { playerId: string }[]): Promise<void> {
+    if (!this.gateway) return;
+    const channels = await this.gateway.listChannels();
+    const byPeer = new Map<string, GatewayChannel>();
+    for (const c of channels) {
+      if (c.stateName === "ChannelReady") byPeer.set(c.peerPubkey, c);
+    }
+    for (const p of players) {
+      const c = byPeer.get(p.playerId);
+      const entry: PlayerLiquidity = {
+        playerId: p.playerId,
+        channelId: c?.channelId ?? this.liquidity.get(p.playerId)?.channelId ?? null,
+        localBalance: c?.localBalance ?? 0n,
+        remoteBalance: c?.remoteBalance ?? 0n,
+        pendingOutgoing: c?.offeredTlcBalance ?? 0n,
+        usableOutbound: (c?.localBalance ?? 0n) - (c?.offeredTlcBalance ?? 0n),
+      };
+      this.liquidity.set(p.playerId, entry);
+    }
+  }
+
+  /**
+   * Pre-hand admission: every player's stack must be payable from table
+   * outbound capacity on their own channel. `stacks` keyed by playerId.
+   */
+  canStartHand(stacks: Map<string, Shannon>): { ok: true } | { ok: false; reason: string } {
+    if (this.paused) return { ok: false, reason: `hands paused: ${this.pausedReason}` };
+    // Fake-settlement mode has no real directional liquidity to defend.
+    if (!this.gateway) return { ok: true };
+    for (const [playerId, stack] of stacks) {
+      const lq = this.liquidity.get(playerId);
+      if (!lq || !lq.channelId) {
+        return { ok: false, reason: `no channel for ${short(playerId)}` };
+      }
+      if (lq.usableOutbound < stack) {
+        return {
+          ok: false,
+          reason: `insufficient payout capacity to ${short(playerId)}: outbound ${lq.usableOutbound} < stack ${stack}`,
+        };
+      }
+    }
+    return { ok: true };
+  }
+
+  /** Operator top-up: fund the table side of a player's channel. */
+  async topUp(playerId: string, amount: bigint): Promise<void> {
+    // A real top-up opens a new funded channel or uses a splice; V0 keeps an
+    // explicit operator path and refuses to silently continue otherwise.
+    if (!this.gateway) return;
+    const lq = this.liquidity.get(playerId);
+    if (!lq?.channelId) throw new Error(`no channel for ${short(playerId)}; cannot top up`);
+    await this.topUpImpl(playerId, amount, lq);
+    await this.refresh([{ playerId }]);
+  }
+
+  private async topUpImpl(_playerId: string, _amount: bigint, _lq: PlayerLiquidity): Promise<void> {
+    throw new Error(
+      "NOT_IMPLEMENTED: operator top-up requires a funded channel open/splice against the pinned FNN build; use oversized channel funding on devnet (docs/04)",
+    );
+  }
+
+  /**
+   * Rebalancing abstraction point (circular self-payments land here in a
+   * later milestone; V0 exposes the interface only).
+   */
+  async rebalance(targetPlayerId: string, amountShannons: bigint): Promise<void> {
+    void targetPlayerId;
+    void amountShannons;
+    throw new Error("NOT_IMPLEMENTED: circular self-payment rebalancing is a future milestone (docs/04)");
+  }
+
+  pause(reason: string): void {
+    this.paused = true;
+    this.pausedReason = reason;
+  }
+
+  resume(): void {
+    this.paused = false;
+    this.pausedReason = "";
+  }
+
+  snapshot(): PlayerLiquidity[] {
+    return [...this.liquidity.values()];
+  }
+}
+
+function short(pubkey: string): string {
+  return `${pubkey.slice(0, 8)}…`;
+}

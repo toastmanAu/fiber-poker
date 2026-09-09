@@ -1,0 +1,1034 @@
+/**
+ * TableServer: authoritative poker coordinator.
+ *
+ * Trust statement (docs/07): this server is authoritative for action
+ * ordering, dealing, and settlement decisions. It is auditable through the
+ * deterministic engine, signed hash-chained commits, and deck
+ * commitment/reveal — it is NOT trustless. UI copy must not claim otherwise.
+ *
+ * Iron rule enforced here: a value-changing action commits ONLY after its
+ * settlement obligation reached SUCCEEDED (payment-before-commit).
+ */
+
+import { WebSocket, WebSocketServer } from "ws";
+import { ServerCommitRevealDeck, type DeckService } from "@fiber-poker/deck";
+import type { EventStore, SnapshotStore } from "@fiber-poker/persistence";
+import {
+  FiberPokerEngine,
+  type EconomicObligation,
+  type PokerAction,
+  type TableConfig,
+  type TableState,
+} from "@fiber-poker/poker-engine";
+import {
+  type ActionEnvelope,
+  actionHash,
+  createChallenge,
+  type PublicTableState,
+  makeMessage,
+  publicView,
+  verifyChallengeResponse,
+  verifyEnvelopeSignature,
+  type SeatStatus,
+} from "@fiber-poker/protocol";
+import { FakeSettlementAdapter, type SettlementAdapter } from "@fiber-poker/settlement";
+import type { FiberGateway } from "@fiber-poker/fiber-adapter";
+import { ChannelManager, type SeatLifecycle } from "./channels.ts";
+import { SettlementCoordinator } from "./coordinator.ts";
+import { LiquidityManager } from "./liquidity.ts";
+import { RecoveryManager, genesisRuntime } from "./recovery.ts";
+import { TableRuntime, type ChainTip, type StateCommitMessage } from "./runtime.ts";
+import { RateLimiter, SessionManager, type Session } from "./sessions.ts";
+import { loadConfig, loadOrCreateServerKeys, type TableServerConfig } from "./config.ts";
+import { serializeBigints, serializeState } from "./serde.ts";
+
+export interface TableServerOverrides {
+  gateway?: FiberGateway | null;
+  adapter?: SettlementAdapter;
+  deck?: DeckService;
+  events?: EventStore;
+  snapshots?: SnapshotStore;
+  keys?: { privateKey: string; publicKey: string };
+}
+
+interface SeatRecord {
+  playerId: string;
+  seat: number;
+  sittingOut: boolean;
+  connected: boolean;
+}
+
+export interface CommitEventResult {
+  commit: StateCommitMessage;
+  state: TableState;
+  obligations: EconomicObligation[];
+  summary: string;
+  eventId: string;
+}
+
+export class TableServer {
+  readonly config: TableServerConfig;
+  readonly tableConfig: TableConfig;
+  readonly engine = new FiberPokerEngine();
+  readonly sessions = new SessionManager();
+  readonly limiter: RateLimiter;
+  readonly deck: DeckService;
+  readonly adapter: SettlementAdapter;
+  readonly events: EventStore;
+  readonly snapshots: SnapshotStore;
+  readonly gateway: FiberGateway | null;
+  readonly channels: ChannelManager;
+  readonly liquidity: LiquidityManager;
+  readonly coordinator: SettlementCoordinator;
+  runtime!: TableRuntime;
+
+  private wss: WebSocketServer | null = null;
+  private seats = new Map<string, SeatRecord>();
+  private leaveQueue = new Set<string>();
+  private joinQueue: { playerId: string; seat: number; buyIn: bigint; channelId: string }[] = [];
+  private usedNonces = new Set<string>();
+  private turnTimers = new Map<string, NodeJS.Timeout>();
+  private pendingPayments = new Map<string, { obligationIds: string[] }>();
+  private reveals = new Map<string, unknown>();
+  private commitCount = 0;
+  private lastEventId = "";
+  private currentHandId?: string;
+  private lastCompletedHandId?: string;
+  private recovering = true;
+  private startingHand = false;
+  private exclusive: Promise<void> = Promise.resolve();
+  private overrides: TableServerOverrides;
+  private notify: (playerId: string, message: unknown) => void;
+  private notificationLog: { playerId: string; message: Record<string, unknown> }[] = [];
+
+  constructor(cfgOverrides: Partial<TableServerConfig> = {}, overrides: TableServerOverrides = {}) {
+    this.config = loadConfig(cfgOverrides);
+    this.tableConfig = {
+      smallBlind: this.config.smallBlind,
+      bigBlind: this.config.bigBlind,
+      maxSeats: this.config.maxSeats,
+    };
+    this.overrides = overrides;
+    this.limiter = new RateLimiter(this.config.rateLimitPerSecond);
+    this.deck = overrides.deck ?? new ServerCommitRevealDeck();
+    this.gateway = overrides.gateway !== undefined ? overrides.gateway : null;
+    this.events = overrides.events!;
+    this.snapshots = overrides.snapshots!;
+    this.adapter = overrides.adapter ?? new FakeSettlementAdapter();
+
+    this.notify = (playerId, raw: unknown) => {
+      const body = raw as { type?: string; payload?: unknown };
+      const msg = makeMessage(String(body.type ?? "ERROR"), body.payload ?? {}) as unknown as Record<string, unknown>;
+      this.notificationLog.push({ playerId, message: msg });
+      if (this.notificationLog.length > 5000) this.notificationLog.shift();
+      const session = this.sessions.getByPlayer(playerId);
+      if (session && session.socket.readyState === WebSocket.OPEN) {
+        session.socket.send(JSON.stringify(serializeBigints(msg)));
+      }
+    };
+
+    this.channels = new ChannelManager(this.gateway, this.config.channelFunding, this.notify);
+    this.liquidity = new LiquidityManager(this.gateway);
+    this.coordinator = new SettlementCoordinator(this.adapter, this.events, this.notify);
+    this.coordinator.setTableId(this.config.tableId);
+    if (this.adapter instanceof FakeSettlementAdapter) {
+      this.adapter.autoPayPlayerPayments = this.config.autoPay;
+    }
+  }
+
+  /** Serialize all state mutations through one promise chain. */
+  private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const next = this.exclusive.then(fn, fn);
+    this.exclusive = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  notificationLogFor(playerId: string): Record<string, unknown>[] {
+    return this.notificationLog.filter((n) => n.playerId === playerId).map((n) => n.message);
+  }
+
+  seatRecords(): SeatRecord[] {
+    return [...this.seats.values()];
+  }
+
+  seatStatuses(): SeatStatus[] {
+    return [...this.seats.values()].map((s) => ({
+      playerId: s.playerId,
+      seat: s.seat,
+      lifecycle: "PLAYING",
+      connected: s.connected,
+      sittingOut: s.sittingOut,
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Lifecycle
+  // -------------------------------------------------------------------------
+
+  async start(): Promise<void> {
+    const keys = this.overrides.keys ?? loadOrCreateServerKeys(this.config.dataDir);
+    const genesis = genesisRuntime(this.config.tableId, this.tableConfig);
+    this.runtime = new TableRuntime(this.events, keys.privateKey, keys.publicKey, genesis.state, genesis.tip);
+
+    const recovery = new RecoveryManager(this.events, this.snapshots, this.coordinator);
+    const result = await recovery.recover(this.runtime, this.tableConfig, (t) => {
+      const remaining = t.deadlineUnixMs - Date.now();
+      if (remaining > 0) {
+        this.armTurnTimer(t.handId, t.sequence, t.actingSeat, remaining);
+      } else {
+        void this.runExclusive(() => this.resolveTimeout(t.actingSeat));
+      }
+    });
+    this.lastEventId = (await this.events.readAll()).at(-1)?.eventId ?? "";
+
+    // Rebuild the in-memory seat map from the recovered engine state; seats
+    // recover as unconnected until their player re-authenticates.
+    for (const s of this.runtime.state.seats) {
+      if (s.playerId !== null) {
+        this.seats.set(s.playerId, { playerId: s.playerId, seat: s.seat, sittingOut: s.sittingOut, connected: false });
+      }
+    }
+    this.recovering = false;
+
+    await new Promise<void>((resolve, reject) => {
+      const wss = new WebSocketServer({ port: this.config.port, host: this.config.host });
+      wss.on("listening", resolve);
+      wss.on("error", reject);
+      wss.on("connection", (socket) => this.onConnection(socket));
+      this.wss = wss;
+    });
+    if (this.config.autoStartHands) {
+      void this.runExclusive(() => this.maybeStartHand());
+    }
+    void result;
+  }
+
+  async stop(): Promise<void> {
+    if (this.stopped) return;
+    this.stopped = true;
+    for (const t of this.turnTimers.values()) clearTimeout(t);
+    this.turnTimers.clear();
+    // Terminate client sockets so close() does not wait on them.
+    for (const session of this.sessions.onlineSessions()) {
+      session.socket.terminate();
+    }
+    await new Promise<void>((resolve, reject) => {
+      if (this.wss) this.wss.close((err) => (err ? reject(err) : resolve()));
+      else resolve();
+    });
+    await this.events.close();
+  }
+
+  private stopped = false;
+
+  /** Hard-kill semantics for crash tests: drop sockets, close the log. */
+  async kill(): Promise<void> {
+    if (this.stopped) return;
+    this.stopped = true;
+    for (const session of this.sessions.onlineSessions()) {
+      session.socket.terminate();
+    }
+    await new Promise<void>((resolve) => {
+      if (this.wss) this.wss.close(() => resolve());
+      else resolve();
+    });
+    await this.events.close();
+  }
+
+  // -------------------------------------------------------------------------
+  // Connections and auth
+  // -------------------------------------------------------------------------
+
+  private onConnection(socket: WebSocket): void {
+    socket.on("message", (raw) => {
+      const text = raw.toString();
+      if (text.length > this.config.maxMessageBytes) {
+        this.sendTo(socket, makeMessage("ERROR", { code: "MESSAGE_TOO_LARGE", detail: "oversized message" }));
+        return;
+      }
+      let msg: Record<string, unknown>;
+      try {
+        msg = JSON.parse(text);
+      } catch {
+        this.sendTo(socket, makeMessage("ERROR", { code: "BAD_JSON", detail: "unparseable message" }));
+        return;
+      }
+      void this.handleMessage(socket, msg).catch((e) => {
+        this.sendTo(socket, makeMessage("ERROR", { code: "INTERNAL", detail: String(e) }));
+      });
+    });
+    socket.on("close", () => {
+      const session = this.sessions.remove(socket);
+      if (session) {
+        const seat = this.seats.get(session.playerId);
+        if (seat) {
+          seat.connected = false;
+          this.broadcast(makeMessage("SEAT_STATUS", { playerId: session.playerId, lifecycle: "DISCONNECTED", connected: false }));
+        }
+      }
+    });
+  }
+
+  private sendTo(socket: WebSocket, message: unknown): void {
+    if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(serializeBigints(message)));
+  }
+
+  private async handleMessage(socket: WebSocket, msg: Record<string, unknown>): Promise<void> {
+    const type = String(msg.type ?? "");
+    const payload = (msg.payload ?? {}) as Record<string, unknown>;
+
+    if (type === "PING") {
+      this.sendTo(socket, makeMessage("PONG", {}));
+      return;
+    }
+
+    const session = this.sessions.get(socket);
+    if (session && !this.limiter.allow(session, Date.now())) {
+      this.sendTo(socket, makeMessage("ERROR", { code: "RATE_LIMITED", detail: "slow down" }));
+      return;
+    }
+
+    switch (type) {
+      case "HELLO": {
+        const pubkey = String(payload.pubkey ?? "");
+        if (!/^[0-9a-f]{66}$/.test(pubkey)) {
+          this.sendTo(socket, makeMessage("AUTH_FAILED", { reason: "bad pubkey" }));
+          return;
+        }
+        const challenge = createChallenge(Date.now(), () => toHex(crypto.getRandomValues(new Uint8Array(32))));
+        this.sessions.createPending(socket, pubkey, challenge);
+        this.sendTo(socket, makeMessage("AUTH_CHALLENGE", { challengeId: challenge.challengeId, challenge: challenge.challenge }));
+        return;
+      }
+      case "AUTH_RESPONSE": {
+        const pending = this.sessions.takePending(socket);
+        if (!pending) {
+          this.sendTo(socket, makeMessage("AUTH_FAILED", { reason: "no pending challenge" }));
+          return;
+        }
+        const signature = String(payload.signature ?? "");
+        const ok = verifyChallengeResponse(pending.challenge, pending.pubkey, signature, Date.now());
+        if (!ok) {
+          this.sendTo(socket, makeMessage("AUTH_FAILED", { reason: "signature invalid or challenge expired" }));
+          return;
+        }
+        const session = this.sessions.register(socket, pending.pubkey);
+        await this.events.append({
+          tableId: this.config.tableId,
+          handId: null,
+          sequence: null,
+          eventType: "PlayerAuthenticated",
+          createdAt: new Date().toISOString(),
+          payload: { playerId: pending.pubkey },
+          fiberRef: null,
+        });
+        this.sendTo(socket, makeMessage("WELCOME", {
+          sessionId: session.sessionId,
+          tablePubkey: this.runtime.tablePublicKey,
+          tableId: this.config.tableId,
+          trustModel: "authoritative-but-auditable (not trustless)",
+          devMode: {
+            autoPay: this.config.autoPay,
+            fakeSettlement: this.adapter instanceof FakeSettlementAdapter,
+          },
+        }));
+        this.sendSnapshot(socket);
+        return;
+      }
+      case "JOIN_TABLE":
+        await this.runExclusive(() => this.joinTable(socket, payload));
+        return;
+      case "ACTION":
+        await this.runExclusive(() => this.onPlayerAction(socket, payload.envelope as ActionEnvelope));
+        return;
+      case "LEAVE_REQUEST":
+        await this.runExclusive(() => this.requestLeave(socket));
+        return;
+      case "SIT_IN":
+      case "SIT_OUT":
+        await this.runExclusive(() => this.sitInOut(socket, type === "SIT_IN"));
+        return;
+      case "ACK_STATE":
+        return;
+      case "RESYNC":
+        this.sendSnapshot(socket);
+        return;
+      case "DECK_AUDIT": {
+        const handId = String(payload.handId ?? "");
+        const reveal = this.reveals.get(handId);
+        if (reveal) {
+          this.sendTo(socket, makeMessage("DECK_REVEALED", reveal as Record<string, unknown>));
+        } else {
+          this.sendTo(socket, makeMessage("ERROR", { code: "NO_REVEAL", detail: `no reveal for ${handId}` }));
+        }
+        return;
+      }
+      default:
+        this.sendTo(socket, makeMessage("ERROR", { code: "UNKNOWN_TYPE", detail: type }));
+    }
+  }
+
+  private sendSnapshot(socket: WebSocket): void {
+    const state: PublicTableState = publicView(this.runtime.state);
+    this.sendTo(socket, makeMessage("TABLE_SNAPSHOT", {
+      state,
+      seats: this.seatStatuses(),
+      chainTip: { sequence: this.runtime.tip.sequence.toString(), stateHash: this.runtime.tip.stateHash },
+      devMode: {
+        autoPay: this.config.autoPay,
+        fakeSettlement: this.adapter instanceof FakeSettlementAdapter,
+      },
+    }));
+  }
+
+  // -------------------------------------------------------------------------
+  // Join / leave / seat lifecycle
+  // -------------------------------------------------------------------------
+
+  private async joinTable(socket: WebSocket, payload: Record<string, unknown>): Promise<void> {
+    const session = this.sessions.get(socket);
+    if (!session) {
+      this.sendTo(socket, makeMessage("ERROR", { code: "UNAUTHENTICATED", detail: "authenticate first" }));
+      return;
+    }
+    const playerId = session.playerId;
+    if (this.seats.has(playerId)) {
+      this.sendTo(socket, makeMessage("ERROR", { code: "ALREADY_SEATED", detail: "already seated" }));
+      return;
+    }
+    const buyIn = BigInt(String(payload.buyInShannons ?? "0"));
+    if (buyIn <= 0n) {
+      this.sendTo(socket, makeMessage("ERROR", { code: "INVALID_BUY_IN", detail: "buyInShannons must be positive" }));
+      return;
+    }
+    const requestedSeat = payload.seat !== undefined ? Number(payload.seat) : undefined;
+
+    // 1. Channel negotiation (private bidirectional channel per seat).
+    this.channels.setLifecycle(playerId, "CONNECTED");
+    await this.events.append({
+      tableId: this.config.tableId,
+      handId: null,
+      sequence: null,
+      eventType: "PlayerConnected",
+      createdAt: new Date().toISOString(),
+      payload: { playerId },
+      fiberRef: null,
+    });
+    const channelId = await this.channels.ensureChannel(playerId);
+    await this.events.append({
+      tableId: this.config.tableId,
+      handId: null,
+      sequence: null,
+      eventType: "ChannelReady",
+      createdAt: new Date().toISOString(),
+      payload: { playerId, channelId },
+      fiberRef: channelId,
+    });
+
+    // 2. Seat selection (memory + authoritative engine state).
+    const taken = new Set([...this.seats.values()].map((s) => s.seat));
+    for (const s of this.runtime.state.seats) {
+      if (s.playerId !== null) taken.add(s.seat);
+    }
+    let seat = -1;
+    if (requestedSeat !== undefined && !taken.has(requestedSeat) && requestedSeat >= 0 && requestedSeat < this.tableConfig.maxSeats) {
+      seat = requestedSeat;
+    } else {
+      for (let i = 0; i < this.tableConfig.maxSeats; i++) {
+        if (!taken.has(i)) {
+          seat = i;
+          break;
+        }
+      }
+    }
+    if (seat < 0) {
+      this.sendTo(socket, makeMessage("ERROR", { code: "TABLE_FULL", detail: "no open seats" }));
+      return;
+    }
+
+    // 3. Liquidity check: table must be able to pay this stack back out.
+    this.channels.setLifecycle(playerId, "LIQUIDITY_CHECK");
+    await this.liquidity.refresh([{ playerId }]);
+    const canPay = this.liquidity.canStartHand(new Map([[playerId, buyIn]]));
+    if (!canPay.ok) {
+      this.sendTo(socket, makeMessage("ERROR", { code: "INSUFFICIENT_TABLE_LIQUIDITY", detail: canPay.reason }));
+      return;
+    }
+
+    // 4. Buy-in payment BEFORE seating (payment-before-commit).
+    const settled = await this.coordinator.fulfil(
+      [
+        {
+          kind: "PAY_TABLE" as const,
+          playerId,
+          amount: buyIn,
+          reason: "BET" as const,
+          obligationId: `buyin:${playerId.slice(0, 12)}:${Date.now()}-${++this.commitCount}`,
+        },
+      ],
+      { handId: "", sequence: this.runtime.tip.sequence, actionHash: `buyin:${playerId.slice(0, 10)}` },
+    );
+    if (settled !== "SETTLED") {
+      this.sendTo(socket, makeMessage("ERROR", { code: "BUY_IN_FAILED", detail: "settlement failed" }));
+      return;
+    }
+
+    // 5. Seat the player via a committed engine action — immediately between
+    // hands, otherwise queued until the live hand completes (docs/10 D009:
+    // membership changes only between hands).
+    const phaseNow = this.runtime.state.phase;
+    if (phaseNow !== "WAITING" && phaseNow !== "HAND_COMPLETE") {
+      this.joinQueue.push({ playerId, seat, buyIn, channelId });
+      this.notify(playerId, { type: "SEAT_STATUS", payload: { lifecycle: "SEAT_QUEUED", seat } });
+      return;
+    }
+    await this.seatPlayer(playerId, seat, buyIn, channelId);
+    if (this.config.autoStartHands) {
+      await this.maybeStartHand();
+    }
+  }
+
+  private async seatPlayer(playerId: string, seat: number, buyIn: bigint, channelId: string): Promise<void> {
+    const r = await this.runtime.commit({ type: "SIT_DOWN", playerId, fiberPubkey: playerId, seat, buyIn });
+    if (!r.ok) {
+      this.notify(playerId, { type: "ERROR", payload: { code: r.code, detail: r.detail } });
+      return;
+    }
+    this.seats.set(playerId, { playerId, seat, sittingOut: false, connected: this.sessions.isOnline(playerId) });
+    await this.events.append({
+      tableId: this.config.tableId,
+      handId: null,
+      sequence: null,
+      eventType: "PlayerSeated",
+      createdAt: new Date().toISOString(),
+      payload: { playerId, seat, buyIn: buyIn.toString() },
+      fiberRef: channelId,
+    });
+    this.broadcast(makeMessage("PLAYER_JOINED", { playerId, seat }));
+    this.broadcastState(r.result);
+    this.maybeSnapshot(r.result.eventId);
+  }
+
+  private async requestLeave(socket: WebSocket): Promise<void> {
+    const session = this.sessions.get(socket);
+    if (!session) return;
+    const record = this.seats.get(session.playerId);
+    if (!record) return;
+    this.leaveQueue.add(session.playerId);
+    await this.events.append({
+      tableId: this.config.tableId,
+      handId: null,
+      sequence: null,
+      eventType: "LeaveRequested",
+      createdAt: new Date().toISOString(),
+      payload: { playerId: session.playerId },
+      fiberRef: null,
+    });
+    this.notify(session.playerId, { type: "SEAT_STATUS", payload: { lifecycle: "LEAVE_PENDING" } });
+    if (this.runtime.state.phase === "WAITING" || this.runtime.state.phase === "HAND_COMPLETE") {
+      await this.processLeaveQueue();
+    }
+  }
+
+  private async sitInOut(socket: WebSocket, sitIn: boolean): Promise<void> {
+    const session = this.sessions.get(socket);
+    if (!session) return;
+    const phase = this.runtime.state.phase;
+    if (phase !== "WAITING" && phase !== "HAND_COMPLETE") {
+      this.sendTo(socket, makeMessage("ERROR", { code: "WRONG_PHASE", detail: "between hands only" }));
+      return;
+    }
+    const r = await this.runtime.commit({ type: sitIn ? "SIT_IN" : "SIT_OUT", playerId: session.playerId });
+    if (!r.ok) {
+      this.sendTo(socket, makeMessage("ERROR", { code: r.code, detail: r.detail }));
+      return;
+    }
+    const record = this.seats.get(session.playerId);
+    if (record) record.sittingOut = sitIn;
+    this.broadcastState(r.result);
+  }
+
+  /** Membership queue: queued joins apply first, then leave payouts. */
+  private async processMembershipQueues(): Promise<void> {
+    for (const pending of [...this.joinQueue]) {
+      await this.seatPlayer(pending.playerId, pending.seat, pending.buyIn, pending.channelId);
+      this.joinQueue = this.joinQueue.filter((j) => j.playerId !== pending.playerId);
+    }
+    await this.processLeaveQueue();
+  }
+
+  /** Leave flow: payout stack -> stand up -> cooperative channel shutdown. */
+  private async processLeaveQueue(): Promise<void> {
+    for (const playerId of [...this.leaveQueue]) {
+      const record = this.seats.get(playerId);
+      if (!record) {
+        this.leaveQueue.delete(playerId);
+        continue;
+      }
+      const seatState = this.runtime.state.seats.find((s) => s.playerId === playerId);
+      const stack = seatState?.stack ?? 0n;
+      if (stack > 0n) {
+        const settled = await this.coordinator.fulfil(
+          [
+            {
+              kind: "PAY_PLAYER" as const,
+              playerId,
+              amount: stack,
+              reason: "PAYOUT" as const,
+              obligationId: `leave:${playerId.slice(0, 12)}:${Date.now()}-${++this.commitCount}`,
+            },
+          ],
+          { handId: "", sequence: this.runtime.tip.sequence, actionHash: `leave:${playerId.slice(0, 10)}` },
+        );
+        if (settled !== "SETTLED") {
+          // Fail-stop: keep the seat; operator resolves channel state.
+          this.liquidity.pause(`leave payout failed for ${playerId.slice(0, 8)}…`);
+          continue;
+        }
+      }
+      const r = await this.runtime.commit({ type: "STAND_UP", playerId });
+      if (!r.ok) continue;
+      this.seats.delete(playerId);
+      this.leaveQueue.delete(playerId);
+      await this.channels.shutdownChannel(playerId);
+      this.broadcast(makeMessage("PLAYER_LEFT", { playerId, seat: record.seat }));
+      this.broadcastState(r.result);
+      this.maybeSnapshot(r.result.eventId);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Hand controller
+  // -------------------------------------------------------------------------
+
+  async maybeStartHand(): Promise<void> {
+    if (this.recovering || this.startingHand) return;
+    const phase = this.runtime.state.phase;
+    if (phase !== "WAITING" && phase !== "HAND_COMPLETE") return;
+
+    const eligible = [...this.seats.values()].filter((s) => s.connected && !s.sittingOut);
+    if (eligible.length < 2) return;
+
+    this.startingHand = true;
+    try {
+      // Pre-hand payout-capacity gate (docs/04).
+      await this.liquidity.refresh(eligible);
+      const stacks = new Map<string, bigint>();
+      for (const s of eligible) {
+        const st = this.runtime.state.seats.find((x) => x.playerId === s.playerId);
+        if (st && st.stack > 0n) stacks.set(s.playerId, st.stack);
+      }
+      if (stacks.size < 2) return;
+      const gate = this.liquidity.canStartHand(stacks);
+      if (!gate.ok) {
+        this.liquidity.pause(gate.reason);
+        return;
+      }
+
+      const handNo = this.runtime.state.handNo + 1;
+      const handId = `${this.config.tableId}-h${handNo}-${Date.now().toString(36)}`;
+      const commitment = await this.deck.commitForHand(handId);
+      const deck = this.deck.deckForHand(handId);
+
+      await this.events.append({
+        tableId: this.config.tableId,
+        handId,
+        sequence: null,
+        eventType: "HandStarted",
+        createdAt: new Date().toISOString(),
+        payload: { handId, players: stacks.size },
+        fiberRef: null,
+      });
+      await this.events.append({
+        tableId: this.config.tableId,
+        handId,
+        sequence: null,
+        eventType: "DeckCommitted",
+        createdAt: new Date().toISOString(),
+        payload: { handId, commitment: commitment.commitment },
+        fiberRef: null,
+      });
+
+      const r = await this.runtime.commit({ type: "START_HAND", handId, deck, deckCommitment: commitment.commitment });
+      if (!r.ok) {
+        console.error(`[table] START_HAND failed: ${r.code} ${r.detail}`);
+        return;
+      }
+      this.currentHandId = handId;
+      this.broadcast(makeMessage("HAND_START", {
+        handId,
+        deckCommitment: commitment.commitment,
+        state: r.result.commit.payload.state,
+      }));
+      this.broadcastState(r.result);
+      await this.afterCommit(r.result);
+    } finally {
+      this.startingHand = false;
+    }
+  }
+
+  private dealHoleCards(): void {
+    for (const seat of this.runtime.state.seats) {
+      if (seat.playerId && seat.holeCards.length > 0) {
+        this.notify(seat.playerId, {
+          type: "HOLE_CARDS",
+          handId: this.runtime.state.handId,
+          payload: { handId: this.runtime.state.handId, cards: seat.holeCards },
+        });
+      }
+    }
+  }
+
+  /**
+   * Player action: verify signature + replay protection + rules, settle the
+   * payment, then commit. A failed payment NEVER commits the action.
+   */
+  private async onPlayerAction(socket: WebSocket, env: ActionEnvelope): Promise<void> {
+    const session = this.sessions.get(socket);
+    if (!env || !session) {
+      this.sendTo(socket, makeMessage("ERROR", { code: "BAD_ENVELOPE", detail: "missing envelope" }));
+      return;
+    }
+    const aHash = toHex(actionHash(env));
+
+    // 1. Signature.
+    if (!verifyEnvelopeSignature(env)) {
+      this.sendTo(socket, makeMessage("ACTION_REJECTED", { code: "BAD_SIGNATURE", detail: "envelope signature invalid", actionHash: aHash }));
+      return;
+    }
+    if (env.actorPubkey !== session.playerId) {
+      this.sendTo(socket, makeMessage("ACTION_REJECTED", { code: "WRONG_KEY", detail: "signed by another key", actionHash: aHash }));
+      return;
+    }
+    // 2. Replay protection (sequence + previous state hash + nonce).
+    const tipCheck = this.runtime.validateEnvelope(env);
+    if (!tipCheck.ok) {
+      this.sendTo(socket, makeMessage("ACTION_REJECTED", { code: tipCheck.code, detail: tipCheck.detail, actionHash: aHash }));
+      return;
+    }
+    if (this.usedNonces.has(env.nonce)) {
+      this.sendTo(socket, makeMessage("ACTION_REJECTED", { code: "DUPLICATE_NONCE", detail: "nonce already used", actionHash: aHash }));
+      return;
+    }
+    const action = tipCheck.action;
+    // 3. Poker rules (pure dry-run).
+    const ruleError = this.runtime.validateAction(action);
+    if (ruleError) {
+      this.sendTo(socket, makeMessage("ACTION_REJECTED", { code: ruleError.code, detail: ruleError.message, actionHash: aHash }));
+      return;
+    }
+
+    // 4. Payment-before-commit for value-changing actions.
+    const paying = this.engine.reduce(this.runtime.state, action);
+    if (!paying.ok) {
+      this.sendTo(socket, makeMessage("ACTION_REJECTED", { code: paying.error.code, detail: paying.error.message, actionHash: aHash }));
+      return;
+    }
+    const toPay = paying.transition.obligations.filter((o) => o.kind === "PAY_TABLE" && o.amount > 0n);
+    if (toPay.length > 0) {
+      const settled = await this.fulfilWithTimeoutPolicy(toPay, {
+        handId: this.runtime.state.handId,
+        sequence: this.runtime.tip.sequence + 1n,
+        actionHash: aHash,
+      }, env.actorPubkey);
+      if (!settled) {
+        this.sendTo(socket, makeMessage("ACTION_REJECTED", { code: "SETTLEMENT_FAILED", detail: "payment did not settle; action not committed", actionHash: aHash }));
+        this.notify(env.actorPubkey, { type: "PAYMENT_STATUS", payload: { status: "FAILED", actionHash: aHash } });
+        return; // no state change; the player may retry within their turn
+      }
+    }
+
+    // 5. Commit exactly once.
+    const r = await this.runtime.commit(action, env);
+    if (!r.ok) {
+      this.sendTo(socket, makeMessage("ACTION_REJECTED", { code: r.code, detail: r.detail, actionHash: aHash }));
+      return;
+    }
+    this.usedNonces.add(env.nonce);
+    this.sendTo(socket, makeMessage("ACTION_ACCEPTED", { actionHash: aHash, sequence: r.result.commit.sequence }));
+    this.broadcastState(r.result);
+    this.maybeSnapshot(r.result.eventId);
+    await this.afterCommit(r.result);
+  }
+
+  /**
+   * Fulfil obligations; if the paying player stalls past the turn deadline,
+   * the timeout path cancels the payment and resolves the turn instead.
+   */
+  private async fulfilWithTimeoutPolicy(
+    obligations: EconomicObligation[],
+    ctx: { handId: string; sequence: bigint; actionHash: string },
+    playerId: string,
+  ): Promise<boolean> {
+    const pending = { obligationIds: obligations.map((o) => o.obligationId) };
+    this.pendingPayments.set(playerId, pending);
+    const settlePromise = this.coordinator.fulfil(obligations, ctx).then((r) => {
+      if (this.pendingPayments.get(playerId) === pending) this.pendingPayments.delete(playerId);
+      return r;
+    });
+    for (;;) {
+      const result = await Promise.race([
+        settlePromise.then((r) => ({ done: true as const, r })),
+        new Promise<{ done: false }>((resolve) => setTimeout(() => resolve({ done: false }), 50)),
+      ]);
+      if (result.done) return result.r === "SETTLED";
+      if (this.pendingPayments.get(playerId) !== pending) return false; // timeout path cancelled us
+    }
+  }
+
+  /** Post-commit flow: blinds, street timers, settlement payouts. */
+  private async afterCommit(result: CommitEventResult): Promise<void> {
+    const phase = result.state.phase;
+
+    if (phase === "PREFLOP" || phase === "FLOP" || phase === "TURN" || phase === "RIVER") {
+      if (result.summary.startsWith("post_bb")) {
+        // Cards are dealt when the big blind posts (PREFLOP entry).
+        this.broadcast(makeMessage("STREET_CHANGED", { street: phase, state: publicView(result.state) }));
+        this.dealHoleCards();
+      } else if (result.summary.includes("street_")) {
+        this.broadcast(makeMessage("STREET_CHANGED", { street: phase, state: publicView(result.state) }));
+      }
+      await this.startTurnTimer();
+      return;
+    }
+    if (phase === "POST_SMALL_BLIND" || phase === "POST_BIG_BLIND") {
+      await this.processBlindObligation(result.obligations);
+      return;
+    }
+    if (phase === "SETTLEMENT") {
+      await this.settleHand(result);
+      return;
+    }
+    if (phase === "HAND_COMPLETE" || phase === "WAITING") {
+      await this.processMembershipQueues();
+      if (this.config.autoStartHands) {
+        await this.maybeStartHand();
+      }
+    }
+  }
+
+  /** System-action pipeline for blinds. */
+  private async processBlindObligation(obligations: EconomicObligation[]): Promise<void> {
+    if (obligations.length === 0) return;
+    const o = obligations[0]!;
+    const settled = await this.coordinator.fulfil([o], {
+      handId: this.runtime.state.handId,
+      sequence: this.runtime.tip.sequence + 1n,
+      actionHash: `blind:${o.obligationId}`,
+    });
+    if (settled !== "SETTLED") {
+      // Deterministic policy (docs/03): blind payment failed -> abort the
+      // pre-live hand, refund what was paid, pause hands.
+      await this.abortCurrentHand("blind payment failed");
+      return;
+    }
+    const r = await this.runtime.commit({ type: "POST_BLIND", playerId: o.playerId });
+    if (!r.ok) return;
+    this.broadcastState(r.result);
+    this.maybeSnapshot(r.result.eventId);
+    await this.afterCommit(r.result);
+  }
+
+  private async abortCurrentHand(reason: string): Promise<void> {
+    const phase = this.runtime.state.phase;
+    if (phase !== "POST_SMALL_BLIND" && phase !== "POST_BIG_BLIND" && phase !== "HAND_SETUP") return;
+    const r = await this.runtime.commit({ type: "ABORT_HAND", reason });
+    if (!r.ok) return;
+    if (r.result.obligations.length > 0) {
+      await this.coordinator.fulfil(r.result.obligations, {
+        handId: "",
+        sequence: this.runtime.tip.sequence,
+        actionHash: `abort:${Date.now()}`,
+      });
+    }
+    this.broadcastState(r.result);
+    this.maybeSnapshot(r.result.eventId);
+  }
+
+  private async settleHand(result: CommitEventResult): Promise<void> {
+    // Reveal showdown cards to everyone.
+    const showdowns = result.state.seats
+      .filter((s) => s.playerId && s.holeCards.length > 0 && !s.folded)
+      .map((s) => ({ playerId: s.playerId!, cards: s.holeCards }));
+    this.broadcast(makeMessage("HAND_RESULT", {
+      handId: this.currentHandId ?? "",
+      awards: result.state.awards,
+      board: result.state.board,
+      showdowns,
+      pots: result.state.pots,
+    }));
+
+    // Payouts: the hand completes only when every payout is terminal.
+    if (result.obligations.length > 0) {
+      const settled = await this.coordinator.fulfil(result.obligations, {
+        handId: this.currentHandId ?? "",
+        sequence: this.runtime.tip.sequence + 1n,
+        actionHash: `payout:${this.currentHandId ?? ""}`,
+      });
+      if (settled !== "SETTLED") {
+        // Fail-stop in SETTLEMENT: pots are decided; payouts must complete.
+        this.liquidity.pause(`payout failed during settlement of ${this.currentHandId}`);
+        return;
+      }
+    }
+    const r = await this.runtime.commit({ type: "DISTRIBUTE_POTS" });
+    if (!r.ok) return;
+    this.lastCompletedHandId = this.currentHandId ?? "";
+    this.broadcastState(r.result);
+    this.maybeSnapshot(r.result.eventId);
+
+    // Deck reveal for audit.
+    const handId = this.lastCompletedHandId;
+    if (handId) {
+      try {
+        const reveal = await this.deck.revealForHand(handId);
+        this.reveals.set(handId, reveal);
+        this.broadcast(makeMessage("DECK_REVEALED", reveal as unknown as Record<string, unknown>));
+      } catch {
+        /* deck service without reveal support */
+      }
+    }
+    await this.processMembershipQueues();
+    if (this.config.autoStartHands) {
+      await this.maybeStartHand();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Timers
+  // -------------------------------------------------------------------------
+
+  private async startTurnTimer(): Promise<void> {
+    const state = this.runtime.state;
+    if (state.actingSeat === undefined) return;
+    const seat = state.seats[state.actingSeat]!;
+    if (!seat.playerId) return;
+    const handId = state.handId;
+    const sequence = state.sequence.toString();
+    const deadline = Date.now() + this.config.turnTimeoutMs;
+    await this.events.append({
+      tableId: this.config.tableId,
+      handId,
+      sequence,
+      eventType: "TurnTimerStarted",
+      createdAt: new Date().toISOString(),
+      payload: { handId, sequence, actingSeat: state.actingSeat, deadlineUnixMs: deadline },
+      fiberRef: null,
+    });
+    this.armTurnTimer(handId, sequence, state.actingSeat, this.config.turnTimeoutMs);
+    this.notify(seat.playerId, {
+      type: "YOUR_TURN",
+      payload: {
+        handId,
+        deadlineUnixMs: deadline,
+        legal: this.engine.legalActions(state, seat.playerId),
+        sequence: this.runtime.tip.sequence + 1n,
+      },
+    });
+  }
+
+  private armTurnTimer(handId: string, sequence: string, actingSeat: number, timeoutMs: number): void {
+    const key = `${handId}:${sequence}`;
+    const old = this.turnTimers.get(key);
+    if (old) clearTimeout(old);
+    const timer = setTimeout(() => {
+      void this.runExclusive(() => this.resolveTimeout(actingSeat));
+    }, timeoutMs);
+    this.turnTimers.set(key, timer);
+  }
+
+  /** Disconnect policy: automatic CHECK if legal, otherwise FOLD. */
+  private async resolveTimeout(actingSeat: number): Promise<void> {
+    const state = this.runtime.state;
+    if (state.actingSeat !== actingSeat) return;
+    if (state.phase !== "PREFLOP" && state.phase !== "FLOP" && state.phase !== "TURN" && state.phase !== "RIVER") return;
+    const seat = state.seats[actingSeat]!;
+    if (!seat.playerId) return;
+    const playerId = seat.playerId;
+
+    // Cancel any stalled payment for this player first.
+    const pending = this.pendingPayments.get(playerId);
+    if (pending) {
+      for (const id of pending.obligationIds) {
+        const inflight = this.coordinator.inflight.get(id);
+        if (inflight) await this.adapter.cancel?.(inflight.ref, "turn timeout");
+      }
+      this.pendingPayments.delete(playerId);
+    }
+
+    await this.events.append({
+      tableId: this.config.tableId,
+      handId: state.handId,
+      sequence: state.sequence.toString(),
+      eventType: "TurnTimeoutResolved",
+      createdAt: new Date().toISOString(),
+      payload: { handId: state.handId, sequence: state.sequence.toString(), actingSeat },
+      fiberRef: null,
+    });
+
+    const legal = this.engine.legalActions(state, playerId);
+    const canCheck = (legal?.actions as readonly string[]).includes("CHECK") ?? false;
+    const action: PokerAction = canCheck ? { type: "TIMEOUT_CHECK", playerId } : { type: "TIMEOUT_FOLD", playerId };
+    const r = await this.runtime.commit(action);
+    if (!r.ok) return;
+    this.broadcastState(r.result);
+    this.maybeSnapshot(r.result.eventId);
+    await this.afterCommit(r.result);
+  }
+
+  // -------------------------------------------------------------------------
+  // Broadcast helpers
+  // -------------------------------------------------------------------------
+
+  private broadcastState(result: CommitEventResult): void {
+    const wire = JSON.stringify(serializeBigints(result.commit));
+    for (const session of this.sessions.onlineSessions()) {
+      session.socket.send(wire);
+    }
+  }
+
+  private broadcast(message: { type: string; payload?: unknown }): void {
+    const msg = makeMessage(message.type, serializeBigints(message.payload ?? {}));
+    const wire = JSON.stringify(msg);
+    for (const session of this.sessions.onlineSessions()) {
+      session.socket.send(wire);
+    }
+  }
+
+  private maybeSnapshot(eventId: string): void {
+    this.lastEventId = eventId;
+    this.commitCount += 1;
+    if (this.commitCount % this.config.snapshotEvery === 0) {
+      void this.snapshots.save({
+        lastEventId: eventId,
+        stateHash: this.runtime.tip.stateHash,
+        state: JSON.parse(serializeState(this.runtime.state)),
+        savedAt: new Date().toISOString(),
+        protocolVersion: 1,
+      });
+    }
+  }
+
+  isRecovering(): boolean {
+    return this.recovering;
+  }
+
+  /** Actual listening port (useful when configured with port 0). */
+  get port(): number {
+    const addr = this.wss?.address();
+    return typeof addr === "object" && addr ? addr.port : this.config.port;
+  }
+
+  chainTip(): { sequence: bigint; stateHash: string } {
+    return { ...this.runtime.tip };
+  }
+}
+
+function toHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
+}

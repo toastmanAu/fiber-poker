@@ -1,0 +1,19 @@
+{
+  "name": "@fiber-poker/table-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Authoritative-but-auditable poker table coordinator with Fiber payment-before-commit settlement.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./main": "./src/main.ts"
+  },
+  "dependencies": {
+    "@fiber-poker/deck": "*",
+    "@fiber-poker/fiber-adapter": "*",
+    "@fiber-poker/persistence": "*",
+    "@fiber-poker/poker-engine": "*",
+    "@fiber-poker/protocol": "*",
+    "@fiber-poker/settlement": "*"
+  }
+}

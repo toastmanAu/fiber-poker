@@ -1,0 +1,15 @@
+{
+  "name": "@fiber-poker/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Canonical encoding, CKB-friendly hashing, secp256k1 signatures, state hash chain, and WS message contracts.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fiber-poker/poker-engine": "*",
+    "@noble/curves": "^1.9.0",
+    "@noble/hashes": "^1.7.0"
+  }
+}

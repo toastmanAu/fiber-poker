@@ -1,0 +1,13 @@
+{
+  "name": "@fiber-poker/persistence",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Append-only event store (the source of truth) and snapshot store.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fiber-poker/protocol": "*"
+  }
+}

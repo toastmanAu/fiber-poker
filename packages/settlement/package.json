@@ -1,0 +1,16 @@
+{
+  "name": "@fiber-poker/settlement",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Settlement adapters: immediate Fiber settlement, fake adapter with fault injection for CI, hold-invoice experiment, future state-channel stub.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fiber-poker/fiber-adapter": "*",
+    "@fiber-poker/poker-engine": "*",
+    "@fiber-poker/protocol": "*",
+    "@noble/hashes": "^1.7.0"
+  }
+}

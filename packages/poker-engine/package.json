@@ -1,0 +1,10 @@
+{
+  "name": "@fiber-poker/poker-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pure deterministic No-Limit Texas Hold'em engine (2-6 seats). No IO, no clock, no RNG, no floating point.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

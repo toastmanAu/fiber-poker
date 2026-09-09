@@ -1,0 +1,14 @@
+{
+  "name": "@fiber-poker/deck",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Swappable deck services: V0 server CSPRNG + commit/reveal; stubs for multiparty seed and mental poker.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@fiber-poker/protocol": "*",
+    "@fiber-poker/poker-engine": "*"
+  }
+}
