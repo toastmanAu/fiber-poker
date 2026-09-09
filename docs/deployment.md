@@ -92,6 +92,13 @@ FNN v0.9.0 ships a watchtower RPC module (`create_watch_channel`,
 
 Template: `infra/watchtower/config.toml.template`.
 
+The punishing guarantee under test (`tests/fiber/force-close.test.ts`):
+a unilateral close broadcasting a STALE commitment is only punishable by
+towers that actually registered the channel and witnessed the newer
+commitment. Coverage is therefore an operational requirement, not an
+optional extra: register every table channel with the tower at open and
+keep it registered for the channel's lifetime.
+
 ## 5. Force close policy
 
 - Cooperative shutdown (`shutdown_channel { channel_id }`) is the normal

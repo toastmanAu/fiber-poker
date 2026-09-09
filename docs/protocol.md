@@ -133,6 +133,15 @@ the dealer chose an unfavorable shuffle before committing — the server sees
 all cards.** V1 (multiparty seed commit/reveal) and V2 (mental poker) are
 interface stubs in `packages/deck`.
 
+## State acknowledgements
+
+After verifying a `STATE_COMMIT` (signature + chain re-hash), clients send
+`ACK_STATE { sequence, stateHash }`. The server appends a
+`StateAckRecorded` event (idempotent per player per state) and includes a
+per-player ack summary in `TABLE_SNAPSHOT`. Acks are dispute evidence:
+they prove which players observed and implicitly accepted which states.
+Acks are never required for the chain to advance.
+
 ## Payment-before-commit
 
 Value-changing actions carry a settlement obligation correlated by

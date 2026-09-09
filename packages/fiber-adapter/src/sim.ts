@@ -43,6 +43,21 @@ interface SimChannel {
   balanceB: bigint;
   public: boolean;
   oneWay: boolean;
+  /**
+   * Commitment version: bumped on every agreed state update. A unilateral
+   * close claiming an older version is a stale commitment and punishable
+   * by the watchtower / counterparty.
+   */
+  version: number;
+  /** Unilateral close pending on-chain settlement (matures as ticks pass). */
+  pendingForceClose?: {
+    closer: string;
+    /** Settled at tick >= this. */
+    maturesAtTick: number;
+    toCloser: bigint;
+    toCounterparty: bigint;
+    punishable: boolean;
+  };
 }
 
 export interface SimNodeConfig {
@@ -62,6 +77,20 @@ export class SimulatedFiberNetwork {
   private paymentCounter = 0;
   /** Simulated clock for latency (advanced by tick()). */
   private now = 0;
+  /** Watchtower-registered channels: channelId -> latest witnessed version. */
+  private towerRegistry = new Map<string, number>();
+  /** Closure records for force-close recovery tests. */
+  private closures: { channelId: string; closer: string; mode: "cooperative" | "force" | "force-punished" }[] = [];
+
+  /** The simulated watchtower: registers channels, witnesses updates. */
+  get watchtower(): SimWatchtower {
+    return new SimWatchtower(this);
+  }
+
+  /** Completed closures (recovery-path introspection for tests). */
+  closureLog(): readonly { channelId: string; closer: string; mode: "cooperative" | "force" | "force-punished" }[] {
+    return this.closures;
+  }
 
   addNode(cfg: SimNodeConfig): this {
     this.nodes.set(cfg.pubkey, { ...cfg });
@@ -126,6 +155,7 @@ export class SimulatedFiberNetwork {
       balanceB: 0n,
       public: false,
       oneWay: false,
+      version: 1,
     };
     this.channels.push(ch);
     return ch.channelId;
@@ -193,6 +223,16 @@ export class SimulatedFiberNetwork {
       ch.balanceA += amount;
     }
     void toBalance;
+    // Every agreed state update produces a new commitment version, which a
+    // registered watchtower witnesses.
+    ch.version += 1;
+    this.witness(ch.channelId, ch.version);
+  }
+
+  private witness(channelId: string, version: number): void {
+    if (this.towerRegistry.has(channelId)) {
+      this.towerRegistry.set(channelId, Math.max(this.towerRegistry.get(channelId)!, version));
+    }
   }
 
   paymentStatus(paymentHash: string): SimPayment {
@@ -211,27 +251,130 @@ export class SimulatedFiberNetwork {
     return this.channels.filter((c) => (c.nodeA === pubkey || c.nodeB === pubkey) && c.state !== "Closed");
   }
 
-  shutdownChannel(channelId: string, force = false): void {
-    const ch = this.channels.find((c) => c.channelId === channelId);
+  channelById(channelId: string): SimChannel | undefined {
+    return this.channels.find((c) => c.channelId === channelId);
+  }
+
+  /** Current commitment version of a channel. */
+  commitmentVersion(channelId: string): number {
+    const ch = this.channelById(channelId);
     if (!ch) throw new Error(`unknown channel ${channelId}`);
-    if (force) {
+    return ch.version;
+  }
+
+  /**
+   * Cooperative close: both parties sign the final state; balances settle
+   * immediately. `force` is unilateral: the closer broadcasts their latest
+   * commitment and the counterparty's payout matures after
+   * `delayTicks` ticks — unless the broadcast commitment is STALE
+   * (`claimedVersion` below the live version), in which case the watchtower
+   * punishes: the closer forfeits their entire channel balance.
+   */
+  shutdownChannel(channelId: string, opts: { force?: boolean; claimedVersion?: number; delayTicks?: number; closer?: string } = {}): void {
+    const ch = this.channelById(channelId);
+    if (!ch) throw new Error(`unknown channel ${channelId}`);
+    if (ch.state !== "ChannelReady") throw new Error(`channel ${channelId} not closable from state ${ch.state}`);
+
+    if (!opts.force) {
       ch.state = "Closed";
-    } else {
-      ch.state = "Closed"; // simulator: cooperative shutdown is immediate
+      this.closures.push({ channelId, closer: opts.closer ?? ch.nodeA, mode: "cooperative" });
+      return;
     }
+
+    const closer = opts.closer ?? ch.nodeA;
+    const counterparty = closer === ch.nodeA ? ch.nodeB : ch.nodeA;
+    const claimed = opts.claimedVersion ?? ch.version;
+    const liveVersion = ch.version;
+
+    if (claimed < liveVersion && this.towerRegistry.has(channelId)) {
+      // Stale commitment broadcast: the watchtower (or counterparty)
+      // punishes. The cheater forfeits their whole channel balance.
+      const cheaterIsA = closer === ch.nodeA;
+      const forfeit = cheaterIsA ? ch.balanceA : ch.balanceB;
+      if (cheaterIsA) {
+        ch.balanceB += ch.balanceA;
+        ch.balanceA = 0n;
+      } else {
+        ch.balanceA += ch.balanceB;
+        ch.balanceB = 0n;
+      }
+      void forfeit;
+      ch.state = "Closed";
+      this.closures.push({ channelId, closer, mode: "force-punished" });
+      return;
+    }
+
+    // Honest unilateral close: closer's funds return immediately, the
+    // counterparty's payout matures on-chain after the delay.
+    const closerIsA = closer === ch.nodeA;
+    ch.pendingForceClose = {
+      closer,
+      maturesAtTick: this.now + (opts.delayTicks ?? 2),
+      toCloser: closerIsA ? ch.balanceA : ch.balanceB,
+      toCounterparty: closerIsA ? ch.balanceB : ch.balanceA,
+      punishable: false,
+    };
+    ch.state = "ShuttingDown";
+    this.closures.push({ channelId, closer, mode: "force" });
   }
 
   /** Test helper: push balances around without payments. */
   setChannelBalances(channelId: string, a: bigint, b: bigint): void {
-    const ch = this.channels.find((c) => c.channelId === channelId);
+    const ch = this.channelById(channelId);
     if (!ch) throw new Error(`unknown channel ${channelId}`);
     ch.balanceA = a;
     ch.balanceB = b;
+    ch.version += 1;
+    this.witness(channelId, ch.version);
   }
 
-  /** Advance the simulated clock by one step (resolves latency). */
+  /** Advance the simulated clock by one step (resolves latency, closes). */
   tick(): void {
     this.now += 1;
+    for (const ch of this.channels) {
+      const pending = ch.pendingForceClose;
+      if (pending && this.now >= pending.maturesAtTick && ch.state === "ShuttingDown") {
+        // Payouts from the last commitment settle on-chain.
+        if (pending.toCloser > 0n) {
+          const n = this.nodes.get(pending.closer);
+          if (n) n.balance += pending.toCloser;
+        }
+        ch.state = "Closed";
+        ch.pendingForceClose = undefined;
+      }
+    }
+  }
+}
+
+/**
+ * Simulated watchtower: registers channels, witnesses every commitment
+ * update, and can report/punish stale unilateral closes.
+ */
+export class SimWatchtower {
+  constructor(private readonly net: SimulatedFiberNetwork) {}
+
+  /** Begin watching a channel from its current commitment version. */
+  register(channelId: string): void {
+    const ch = this.net.channelById(channelId);
+    if (!ch) throw new Error(`unknown channel ${channelId}`);
+    const current = this.net.commitmentVersion(channelId);
+    const registered = this.net["towerRegistry"].get(channelId);
+    this.net["towerRegistry"].set(channelId, Math.max(registered ?? 0, current));
+  }
+
+  /** Latest commitment version the tower has witnessed for a channel. */
+  witnessedVersion(channelId: string): number {
+    return this.net["towerRegistry"].get(channelId) ?? -1;
+  }
+
+  /**
+   * True when the channel was closed with a commitment older than the one
+   * the tower witnessed (the punish condition).
+   */
+  seesStaleClose(channelId: string): boolean {
+    const log = this.net.closureLog();
+    const last = [...log].reverse().find((c) => c.channelId === channelId);
+    return last?.mode === "force-punished";
   }
 }
 
@@ -282,8 +425,24 @@ export class SimNodeGateway implements FiberGateway {
     return all.find((c) => c.peerPubkey === peerPubkey && c.stateName === "ChannelReady");
   }
 
-  async shutdownChannel(channelId: string, opts?: { force?: boolean }): Promise<void> {
-    this.net.shutdownChannel(channelId, opts?.force ?? false);
+  async shutdownChannel(channelId: string, opts?: { force?: boolean; claimedVersion?: number; delayTicks?: number }): Promise<void> {
+    this.net.shutdownChannel(channelId, { force: opts?.force ?? false, claimedVersion: opts?.claimedVersion, delayTicks: opts?.delayTicks, closer: this.pubkey });
+  }
+
+  /** Commitment version this node sees for its channel with `peerPubkey`. */
+  async commitmentVersionTo(peerPubkey: string): Promise<number | undefined> {
+    const ch = this.net.channelsOf(this.pubkey).find((c) => (c.nodeA === peerPubkey || c.nodeB === peerPubkey));
+    return ch?.version;
+  }
+
+  /**
+   * Unilateral close claiming a specific commitment version (a stale claim
+   * is punishable when a watchtower has witnessed a newer one).
+   */
+  async forceCloseTo(peerPubkey: string, claimedVersion?: number): Promise<void> {
+    const ch = this.net.channelsOf(this.pubkey).find((c) => (c.nodeA === peerPubkey || c.nodeB === peerPubkey));
+    if (!ch) throw new Error(`no channel to ${peerPubkey.slice(0, 8)}…`);
+    this.net.shutdownChannel(ch.channelId, { force: true, claimedVersion, closer: this.pubkey });
   }
 
   async createInvoice(amount: bigint, paymentHash?: string): Promise<{ paymentHash: string }> {

@@ -72,5 +72,27 @@ default exit.
 3. Star-topology liquidity fragmentation is mitigated by oversized
    table-side funding on devnet; the LiquidityManager pauses hands when
    payout capacity is insufficient, but rebalancing is not automated.
-4. Client state acknowledgements (`ACK_STATE`) are recorded but not yet
-   used to construct multi-party dispute evidence.
+
+## Force-close and watchtower posture (tested)
+
+- Unilateral (force) close is simulated with a dispute delay: the closer's
+  funds return immediately, the counterparty payout matures after the
+  delay (`tests/fiber/force-close.test.ts`).
+- A stale commitment broadcast (claimed commitment version older than the
+  version a registered watchtower witnessed) is PUNISHED: the cheater
+  forfeits their channel balance. An unregistered tower cannot punish —
+  watchtower coverage is part of the deployment requirements
+  (`docs/deployment.md`).
+- The table monitors for unexpected channel closures: the affected seat is
+  blocked (`BLOCKED_CLOSURE`), hands pause, and a `ChannelClosed` event is
+  persisted; reopening requires the explicit operator path
+  (`resolveClosure`) — never "continue and hope".
+
+## Dispute evidence (ACK_STATE)
+
+Clients acknowledge every verified state commit (`ACK_STATE { sequence,
+stateHash }`). Acks are appended to the event log (`StateAckRecorded`),
+exposed in `TABLE_SNAPSHOT`, and recovered after restart. For any
+committed sequence, the log proves which players have seen and implicitly
+accepted which state — the raw material for future multi-party dispute
+work (docs/14).

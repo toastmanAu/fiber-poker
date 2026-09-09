@@ -203,8 +203,14 @@ export class PokerSession {
     // Recompute the chain hash over the public state (full client audit).
     const view = normalizeView(p.state);
     const expected = nextStateHash(p.previousStateHash, p.actionHash, view);
-    if (expected !== p.stateHash) this.chain.broken = true;
-    else this.chain.verifiedCount += 1;
+    if (expected !== p.stateHash) {
+      this.chain.broken = true;
+    } else {
+      this.chain.verifiedCount += 1;
+      // Acknowledge verified states: durable dispute evidence on the server
+      // (docs/05 ACK(tableId, handId, sequence, stateHash)).
+      this.send("ACK_STATE", { sequence: String(p.state.sequence), stateHash: p.stateHash });
+    }
     this.expectedSeq = BigInt(String(p.state.sequence));
     this.lastStateHash = p.stateHash;
     this.tableState = view;

@@ -56,6 +56,7 @@ interface SeatRecord {
   seat: number;
   sittingOut: boolean;
   connected: boolean;
+  lifecycle?: string;
 }
 
 export interface CommitEventResult {
@@ -95,6 +96,11 @@ export class TableServer {
   private currentHandId?: string;
   private lastCompletedHandId?: string;
   private recovering = true;
+  /** Players whose channel closed unexpectedly; seat blocked until resolved. */
+  private blockedSeats = new Set<string>();
+  private monitorTimer: NodeJS.Timeout | null = null;
+  /** Latest state acknowledgement per player (dispute evidence). */
+  private acks = new Map<string, { sequence: string; stateHash: string; at: string }>();
   private startingHand = false;
   private exclusive: Promise<void> = Promise.resolve();
   private overrides: TableServerOverrides;
@@ -182,7 +188,19 @@ export class TableServer {
         void this.runExclusive(() => this.resolveTimeout(t.actingSeat));
       }
     });
-    this.lastEventId = (await this.events.readAll()).at(-1)?.eventId ?? "";
+    // Rebuild ack bookkeeping + last event id from the log.
+    const allEvents = await this.events.readAll();
+    for (const event of allEvents) {
+      if (event.eventType === "StateAckRecorded") {
+        const p = event.payload as { playerId: string; stateHash: string };
+        this.acks.set(p.playerId, {
+          sequence: event.sequence ?? "0",
+          stateHash: p.stateHash,
+          at: event.createdAt,
+        });
+      }
+    }
+    this.lastEventId = allEvents.at(-1)?.eventId ?? "";
 
     // Rebuild the in-memory seat map from the recovered engine state; seats
     // recover as unconnected until their player re-authenticates.
@@ -200,10 +218,82 @@ export class TableServer {
       wss.on("connection", (socket) => this.onConnection(socket));
       this.wss = wss;
     });
+    // Force-close monitoring: a peer may unilaterally close at any time
+    // (docs/07: block seat reuse until closure state is resolved).
+    if (this.gateway) {
+      this.monitorTimer = setInterval(() => {
+        void this.runExclusive(() => this.checkChannelClosures());
+      }, 10_000);
+      this.monitorTimer.unref?.();
+    }
     if (this.config.autoStartHands) {
       void this.runExclusive(() => this.maybeStartHand());
     }
     void result;
+  }
+
+  /**
+   * Force-close recovery: observe unexpected channel closures, block the
+   * affected seats, and pause hands. Recovery is explicit (resolveClosure).
+   */
+  blockedSeatIds(): string[] {
+    return [...this.blockedSeats];
+  }
+
+  async checkChannelClosures(): Promise<string[]> {
+    if (!this.gateway) return [];
+    const closed: string[] = [];
+    const channels = await this.gateway.listChannels();
+    const readyPeers = new Set(channels.filter((c) => c.stateName === "ChannelReady").map((c) => c.peerPubkey));
+    const closingPeers = new Set(channels.filter((c) => c.stateName !== "ChannelReady" && c.stateName !== "Closed").map((c) => c.peerPubkey));
+    for (const record of this.seats.values()) {
+      if (this.blockedSeats.has(record.playerId)) continue;
+      if (!readyPeers.has(record.playerId) && !closingPeers.has(record.playerId)) {
+        // The player's channel vanished without a cooperative leave flow:
+        // treat as force-closed until an operator resolves it.
+        this.blockedSeats.add(record.playerId);
+        record.lifecycle = "BLOCKED_CLOSURE" as SeatLifecycle;
+        this.liquidity.pause(`force-close detected: ${record.playerId.slice(0, 8)}…`);
+        closed.push(record.playerId);
+        await this.events.append({
+          tableId: this.config.tableId,
+          handId: null,
+          sequence: null,
+          eventType: "ChannelClosed",
+          createdAt: new Date().toISOString(),
+          payload: { playerId: record.playerId, mode: "force-closed-observed" },
+          fiberRef: null,
+        });
+        this.broadcast(makeMessage("SEAT_STATUS", {
+          playerId: record.playerId,
+          lifecycle: "BLOCKED_CLOSURE",
+          connected: record.connected,
+        }));
+      }
+    }
+    return closed;
+  }
+
+  /**
+   * Operator recovery path: re-establish the channel for a blocked seat and
+   * resume hands when no blocks remain.
+   */
+  async resolveClosure(playerId: string): Promise<{ resolved: boolean; reason?: string }> {
+    if (!this.blockedSeats.has(playerId)) return { resolved: false, reason: "not blocked" };
+    if (!this.gateway) {
+      this.blockedSeats.delete(playerId);
+      this.liquidity.resume();
+      return { resolved: true };
+    }
+    try {
+      await this.channels.ensureChannel(playerId);
+    } catch (e) {
+      return { resolved: false, reason: String(e) };
+    }
+    this.blockedSeats.delete(playerId);
+    if (this.blockedSeats.size === 0) this.liquidity.resume();
+    this.broadcast(makeMessage("SEAT_STATUS", { playerId, lifecycle: "SEAT_READY" }));
+    return { resolved: true };
   }
 
   async stop(): Promise<void> {
@@ -351,8 +441,35 @@ export class TableServer {
       case "SIT_OUT":
         await this.runExclusive(() => this.sitInOut(socket, type === "SIT_IN"));
         return;
-      case "ACK_STATE":
+      case "ACK_STATE": {
+        // Client state acknowledgement: durable dispute evidence. Each
+        // (playerId, sequence, stateHash) ack is appended to the event log
+        // so a third party can prove which states each player has seen and
+        // implicitly accepted.
+        const session = this.sessions.get(socket);
+        if (!session) return;
+        const seq = String(payload.sequence ?? "");
+        const stateHash = String(payload.stateHash ?? "");
+        if (!/^\d+$/.test(seq) || !/^[0-9a-f]{64}$/.test(stateHash)) {
+          this.sendTo(socket, makeMessage("ERROR", { code: "BAD_ACK", detail: "sequence/stateHash malformed" }));
+          return;
+        }
+        const previous = this.acks.get(session.playerId);
+        if (previous && previous.stateHash === stateHash) return; // idempotent
+        const ack = { sequence: seq, stateHash, at: new Date().toISOString() };
+        this.acks.set(session.playerId, ack);
+        await this.events.append({
+          tableId: this.config.tableId,
+          handId: null,
+          sequence: seq,
+          eventType: "StateAckRecorded",
+          createdAt: ack.at,
+          payload: { playerId: session.playerId, stateHash },
+          stateHash,
+          fiberRef: null,
+        });
         return;
+      }
       case "RESYNC":
         this.sendSnapshot(socket);
         return;
@@ -377,11 +494,16 @@ export class TableServer {
       state,
       seats: this.seatStatuses(),
       chainTip: { sequence: this.runtime.tip.sequence.toString(), stateHash: this.runtime.tip.stateHash },
+      acks: [...this.acks.entries()].map(([playerId, a]) => ({ playerId, ...a })),
       devMode: {
         autoPay: this.config.autoPay,
         fakeSettlement: this.adapter instanceof FakeSettlementAdapter,
       },
     }));
+  }
+
+  acksFor(playerId: string): { sequence: string; stateHash: string; at: string } | undefined {
+    return this.acks.get(playerId);
   }
 
   // -------------------------------------------------------------------------
