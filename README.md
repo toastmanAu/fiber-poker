@@ -1,0 +1,102 @@
+# Fiber Poker — implementation
+
+Single-table 2–6 player No-Limit Texas Hold'em over Nervos Fiber Network
+channels. **Devnet/testnet and non-redeemable play value only** — this build
+contains no real-money release path.
+
+> **Trust model: authoritative but auditable — NOT trustless.** The table
+> server deals the cards, orders actions, and decides settlements. It is
+> auditable through a deterministic engine, a signed hash chain, and deck
+> commitment/reveal. Do not describe this system as trustless or provably
+> fair dealing.
+
+## Quickstart (dev, fake settlement)
+
+```bash
+# 1. run the table server (fake settlement: no Fiber node needed)
+npm install
+FIBER_POKER_DATA_DIR=.data/demo FIBER_POKER_PORT=8080 npm run server
+
+# 2. open the mobile-first web client (another terminal)
+npm run dev -w @fiber-poker/web-client     # http://localhost:5173
+#    enter ws://127.0.0.1:8080, pick a buy-in, join.
+#    DEV MODE auto-approves payments — surfaced in the UI.
+
+# 3. or run scripted demos
+npm run demo:two        # two-player table on :8090
+npm run demo:six        # six-player table on :8091 (side pots, leave/join)
+
+# 4. run the whole test suite
+npm test
+```
+
+## Configuration (env)
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `FIBER_POKER_PORT` | `8080` | WebSocket port |
+| `FIBER_POKER_HOST` | `127.0.0.1` | Bind address |
+| `FIBER_POKER_DATA_DIR` | `.data/table` | Server key + event log + snapshots |
+| `FIBER_POKER_SETTLEMENT` | `fake` | `fake` (dev/CI) or `fiber` (FNN JSON-RPC) |
+| `FIBER_POKER_FNN_URL` | – | FNN RPC URL when settlement=fiber |
+| `FIBER_POKER_FNN_TOKEN` | – | FNN auth token (server-side only!) |
+| `FIBER_POKER_TURN_TIMEOUT_MS` | `30000` | Turn timer; expiry = check if legal else fold |
+| `FIBER_POKER_SMALL_BLIND` / `FIBER_POKER_BIG_BLIND` | 1 CKB / 2 CKB | Blinds in shannons |
+| `FIBER_POKER_CHANNEL_FUNDING` | 1000 CKB | Table-side channel funding per seat |
+| `FIBER_POKER_AUTO_PAY` | `true` | Fake-settlement auto-approval (DEV ONLY) |
+| `FIBER_POKER_AUTO_START_HANDS` | `true` | Deal when ≥2 eligible players |
+
+## Repository layout
+
+```
+apps/
+  table-server/   authoritative coordinator (payment-before-commit)
+  web-client/     mobile-first browser client (Vite, no framework)
+packages/
+  poker-engine/   PURE deterministic NLHE engine (no IO/clock/RNG/floats)
+  protocol/       canonical encoding, BLAKE2b hashing, secp256k1 signatures
+  deck/           V0 server commit/reveal deck (+ V1/V2 stubs)
+  persistence/    append-only event store + snapshots
+  settlement/     SettlementAdapter: fake (fault injection), immediate-fiber,
+                  hold-invoice experiment, state-channel stub
+  fiber-adapter/  narrow FNN v0.9.0 gateway + simulated fiber network
+tests/
+  engine/         property/fuzz tests (fast-check)
+  protocol/       envelope/replay/state-chain tests + security tests
+  fiber/          simulated network + liquidity manager tests
+  integration/    2-player and 6-player scripted end-to-end suites + demos
+  chaos/          settlement fault matrix, crash/restart recovery
+docs/             protocol spec, threat model, FNN compatibility note
+infra/            devnet / FNN / watchtower configuration templates
+```
+
+## The one rule that matters
+
+**Economic state never outruns Fiber state.** Every value-changing action
+goes through:
+
+```
+ACTION_PROPOSED -> RULE_VALIDATED -> PAYMENT_PLANNED -> FIBER_INFLIGHT
+                 -> FIBER_SUCCESS -> ACTION_COMMITTED
+```
+
+A failed payment NEVER commits the poker transition. See
+`packages/settlement` and `apps/table-server/src/coordinator.ts`. Chaos
+tests in `tests/chaos/` kill the server at every durable boundary and
+verify exactly-once settlement.
+
+## Documentation
+
+- `docs/protocol.md` — wire format, canonical encoding, hash chain, auth
+- `docs/threat-model.md` — what the table can and cannot do to you
+- `docs/fnn-compat.md` — verified FNN v0.9.0 RPC compatibility note
+- `docs/deployment.md` — devnet deployment guide (CKB devnet + FNN + watchtower)
+- `../fiber-poker-agent-handoff/` — the original specification handoff
+
+## Release gate
+
+Devnet/testnet only. Real-money poker triggers gambling regulation
+(licensing, geofencing, KYC/AML; notably ACMA treats online poker offered
+to Australian customers as a prohibited interactive gambling service).
+Obtain jurisdiction-specific legal advice before any real-value deployment
+and keep those gates outside the protocol.

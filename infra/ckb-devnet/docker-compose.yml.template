@@ -1,0 +1,28 @@
+# CKB devnet compose (template)
+
+# Base: https://github.com/nervosnetwork/ckb-devnet
+# Copy this file to docker-compose.yml, fill the image tags pinned to a
+# known devnet release, and generate the chain specs with the ckb-devnet
+# tooling before first boot.
+#
+# Devnet only — never point this at mainnet.
+
+services:
+  ckb-node:
+    image: nervos/ckb-devnet-node:____PIN_TAG____
+    ports:
+      - "8114:8114"   # RPC (indexer+http) — table FNN node uses this
+    volumes:
+      - ./chain:/root/devnet/chain
+      - ./scripts:/root/devnet/scripts
+
+  ckb-miner:
+    image: nervos/ckb-devnet-miner:____PIN_TAG____
+    depends_on:
+      - ckb-node
+    volumes:
+      - ./chain:/root/devnet/chain
+      - ./scripts:/root/devnet/scripts
+    # devnet mines on demand; keep a small always-on hashrate for channel
+    # commitment confirmations
+    command: ["--always-mining"]

@@ -117,6 +117,11 @@ export class TestClient {
     });
   }
 
+  /** Send a raw message (security tests use this). */
+  sendRaw(type: string, payload: unknown): void {
+    this.send(type, payload);
+  }
+
   private send(type: string, payload: unknown): void {
     this.ws?.send(JSON.stringify({
       type,

@@ -1,0 +1,19 @@
+{
+  "name": "@fiber-poker/web-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Mobile-first browser client for Fiber Poker. Session signing only; never holds Fiber node credentials.",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fiber-poker/poker-engine": "*",
+    "@fiber-poker/protocol": "*"
+  },
+  "devDependencies": {
+    "vite": "^7.0.0"
+  }
+}

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0b3d2e" />
+    <title>Fiber Poker — devnet play only</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand">Fiber Poker</div>
+        <div class="status-chips" id="status-chips"></div>
+      </header>
+
+      <!-- Trust notice: required, never claim trustlessness -->
+      <div class="trust-banner" id="trust-banner">
+        This table is <strong>authoritative, not trustless</strong>: the server deals the
+        cards and decides settlements. It is auditable (signed hash chain + deck
+        commitment), but you trust the operator for fair dealing.
+        <strong>Devnet/testnet play value only.</strong>
+      </div>
+
+      <main id="main">
+        <!-- connect screen -->
+        <section id="screen-connect" class="screen">
+          <h2>Join the table</h2>
+          <label for="ws-url">Table server</label>
+          <input id="ws-url" type="text" value="ws://127.0.0.1:8080" autocapitalize="off" spellcheck="false" />
+          <label for="buy-in">Buy-in (CKB)</label>
+          <input id="buy-in" type="number" value="100" min="1" inputmode="decimal" />
+          <label class="checkbox-row">
+            <input id="dev-autopay" type="checkbox" checked disabled />
+            DEV MODE: server auto-approves payments (fake settlement)
+          </label>
+          <button id="btn-join" class="btn primary big">Connect &amp; join</button>
+          <p class="hint">Your identity key is generated and stored in this browser only.</p>
+        </section>
+
+        <!-- table screen -->
+        <section id="screen-table" class="screen hidden">
+          <div class="table-wrap">
+            <div class="board" id="board"></div>
+            <div class="pot" id="pot">pot 0</div>
+            <div id="seats"></div>
+          </div>
+          <div class="hand-info" id="hand-info"></div>
+
+          <div class="action-bar" id="action-bar">
+            <div class="action-status" id="action-status">waiting…</div>
+            <div class="action-buttons" id="action-buttons">
+              <button class="btn danger" id="btn-fold">Fold</button>
+              <button class="btn" id="btn-check">Check</button>
+              <button class="btn" id="btn-call">Call</button>
+              <div class="raise-row" id="raise-row">
+                <input id="raise-slider" type="range" min="0" max="100" value="0" />
+                <button class="btn accent" id="btn-raise">Raise</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="panels">
+            <section class="panel">
+              <h3>Deck audit</h3>
+              <div id="deck-audit" class="panel-body">No hand revealed yet.</div>
+            </section>
+            <section class="panel">
+              <h3>History</h3>
+              <div id="history" class="panel-body"></div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

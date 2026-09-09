@@ -99,7 +99,7 @@ describe("security", () => {
       action: { type: "FOLD" },
       nonce: "n-crossseat-01",
     });
-    mallory.send("ACTION", { envelope: env });
+    mallory.sendRaw("ACTION", { envelope: env });
     const rejected = await mallory.waitFor("ACTION_REJECTED", 5000);
     const code = (rejected.payload as { code: string }).code;
     expect(["WRONG_KEY", "BAD_SIGNATURE", "OUT_OF_TURN", "STALE_SEQUENCE"]).toContain(code);
@@ -125,7 +125,7 @@ describe("security", () => {
       action: { type: "FOLD" },
       nonce: "n-dup-replay-0001",
     });
-    alice.send("ACTION", { envelope: env });
+    alice.sendRaw("ACTION", { envelope: env });
     const r1 = await alice.waitFor("ACTION_REJECTED", 5000).catch(() => null);
     expect(r1).not.toBeNull();
     void env;
@@ -142,7 +142,7 @@ describe("security", () => {
     // Burst of 40 pings inside one second: most should draw RATE_LIMITED errors
     // (PING is exempt; use an authenticated non-exempt message type).
     for (let i = 0; i < 40; i++) {
-      alice.send("ACK_STATE", { stateHash: "0".repeat(64), sequence: i });
+      alice.sendRaw("ACK_STATE", { stateHash: "0".repeat(64), sequence: i });
     }
     const limited = await alice
       .waitFor("ERROR", 3000, (m) => (m.payload as { code?: string }).code === "RATE_LIMITED")

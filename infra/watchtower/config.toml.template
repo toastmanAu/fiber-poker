@@ -1,0 +1,21 @@
+# Standalone watchtower config template (v0.9.0-compatible)
+
+# Mobile poker players sleep or lose connectivity; a watchtower is the
+# offline-protection layer that punishes stale channel commitments.
+# Run one tower for the table's channels; players run (or subscribe to)
+# their own coverage.
+
+[watchtower]
+listening_addr = "/ip4/127.0.0.1/tcp/8229"
+# Token for the watchtower RPC (players need it to register channels).
+# Treat as a credential: server-side only, never in browser bundles.
+# auth_token = "____GENERATE_RANDOM_32_BYTES____"
+
+[ckb]
+ckb_uri = "http://127.0.0.1:8114"
+script_config = "/path/to/ckb-devnet/scripts"
+
+# Defaults worth knowing (verify against the pinned build):
+#  - watchtower check interval: 60s
+#  - the tower monitors channels registered via create_watch_channel and
+#    broadcasts punishment transactions for stale commitments

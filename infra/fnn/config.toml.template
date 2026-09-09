@@ -1,0 +1,33 @@
+# FNN table node config template (v0.9.0-compatible)
+
+# Copy to fnn-table.toml and fill in the devnet paths.
+# Verify every field against docs/fnn-compat.md and the pinned FNN build.
+
+[node]
+node_name = "fiber-poker-table"
+# 33-byte compressed secp256k1 public key of this node (hex, no 0x)
+node_pubkey = "____PASTE_NODE_PUBKEY____"
+# Where the node listens for fiber P2P connections
+listening_addr = "/ip4/0.0.0.0/udp/8228/quic-v1"
+# OPTIONAL: restrict peers (devnet convenience)
+# announce_private_addr = true
+
+[rpc]
+listening_addr = "/ip4/127.0.0.1/tcp/8227"
+# NEVER expose this interface publicly. The table server process is the
+# only intended client; it holds the credentials.
+
+[ckb]
+# CKB devnet endpoint (ckb-devnet compose)
+ckb_uri = "http://127.0.0.1:8114"
+# 2023-0101 devnet script deployments (adjust to your devnet scripts dir)
+script_config = "/path/to/ckb-devnet/scripts"
+
+#[store]
+# default paths are fine for devnet
+
+# Watchtower: keep the built-in watchtower enabled for the table's own
+# channels, or point at a standalone tower (see infra/watchtower/).
+# disable_built_in_watchtower = false
+# standalone_watchtower_rpc_url = "http://127.0.0.1:8229"
+# standalone_watchtower_token = "____TOKEN____"
