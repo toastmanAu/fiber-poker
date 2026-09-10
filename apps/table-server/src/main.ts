@@ -9,7 +9,7 @@
 
 import { RealFiberGateway } from "@fiber-poker/fiber-adapter";
 import { FileEventStore, FileSnapshotStore } from "@fiber-poker/persistence";
-import { FakeSettlementAdapter, ImmediateFiberSettlement } from "@fiber-poker/settlement";
+import { FakeSettlementAdapter, HoldInvoiceSettlement, ImmediateFiberSettlement } from "@fiber-poker/settlement";
 import { mkdirSync } from "node:fs";
 import { loadConfig, loadOrCreateServerKeys } from "./config.ts";
 import { TableServer } from "./server.ts";
@@ -21,11 +21,17 @@ async function main(): Promise<void> {
 
   let gateway = null;
   let adapter;
-  if (cfg.settlement === "fiber") {
-    if (!cfg.fnnUrl) throw new Error("FIBER_POKER_FNN_URL is required when FIBER_POKER_SETTLEMENT=fiber");
+  if (cfg.settlement === "fiber" || cfg.settlement === "hold") {
+    if (!cfg.fnnUrl) throw new Error(`FIBER_POKER_FNN_URL is required when FIBER_POKER_SETTLEMENT=${cfg.settlement}`);
     gateway = new RealFiberGateway({ url: cfg.fnnUrl, authToken: cfg.fnnToken });
-    adapter = new ImmediateFiberSettlement(gateway, { pollMs: 500, timeoutMs: 120_000 });
-    console.log(`[fiber-poker] settlement: ImmediateFiberSettlement via ${cfg.fnnUrl}`);
+    if (cfg.settlement === "hold") {
+      adapter = new HoldInvoiceSettlement(gateway, { pollMs: 500 });
+      console.log(`[fiber-poker] settlement: HoldInvoiceSettlement (EXPERIMENTAL) via ${cfg.fnnUrl}`);
+      console.log("[fiber-poker] holds lock bet liquidity before commit; settle/cancel at hand end");
+    } else {
+      adapter = new ImmediateFiberSettlement(gateway, { pollMs: 500, timeoutMs: 120_000 });
+      console.log(`[fiber-poker] settlement: ImmediateFiberSettlement via ${cfg.fnnUrl}`);
+    }
   } else {
     adapter = new FakeSettlementAdapter();
     console.log("[fiber-poker] settlement: FakeSettlementAdapter (DEV ONLY - no real Fiber)");

@@ -135,7 +135,11 @@ export class TableServer {
 
     this.channels = new ChannelManager(this.gateway, this.config.channelFunding, this.notify);
     this.liquidity = new LiquidityManager(this.gateway);
-    this.coordinator = new SettlementCoordinator(this.adapter, this.events, this.notify);
+    this.coordinator = new SettlementCoordinator(this.adapter, this.events, this.notify, {
+      // Hold mode: actions commit on HELD liquidity; hand end settles.
+      holdMode: this.adapter.constructor.name === "HoldInvoiceSettlement",
+      awaitTimeoutMs: this.config.settlementTimeoutMs,
+    });
     this.coordinator.setTableId(this.config.tableId);
     if (this.adapter instanceof FakeSettlementAdapter) {
       this.adapter.autoPayPlayerPayments = this.config.autoPay;
@@ -957,9 +961,16 @@ export class TableServer {
   private async abortCurrentHand(reason: string): Promise<void> {
     const phase = this.runtime.state.phase;
     if (phase !== "POST_SMALL_BLIND" && phase !== "POST_BIG_BLIND" && phase !== "HAND_SETUP") return;
+    const abortingHandId = this.currentHandId ?? "";
     const r = await this.runtime.commit({ type: "ABORT_HAND", reason });
     if (!r.ok) return;
-    if (r.result.obligations.length > 0) {
+    if (this.coordinator.holdMode) {
+      // Cancel every held invoice for this hand: funds return to the payers
+      // by protocol. The engine's refund obligations are satisfied by the
+      // cancellation — paying them as well would double-pay.
+      const cancelled = await this.coordinator.cancelHand(abortingHandId);
+      void cancelled;
+    } else if (r.result.obligations.length > 0) {
       await this.coordinator.fulfil(r.result.obligations, {
         handId: "",
         sequence: this.runtime.tip.sequence,
@@ -982,6 +993,20 @@ export class TableServer {
       showdowns,
       pots: result.state.pots,
     }));
+
+    // Hold-mode completion policy: settle every held invoice for this hand
+    // FIRST — the pot's chips genuinely reach the table before payouts flow.
+    const settlingHandId = this.currentHandId ?? "";
+    if (this.coordinator.holdMode && this.coordinator.heldCountFor(settlingHandId) > 0) {
+      const { settled, failed } = await this.coordinator.finalizeHand(settlingHandId);
+      if (failed.length > 0) {
+        // Fail-stop: held chips did not settle; never distribute a pot that
+        // the table has not actually collected.
+        this.liquidity.pause(`hold finalize failed for ${settlingHandId}: ${failed.join("; ")}`);
+        return;
+      }
+      void settled;
+    }
 
     // Payouts: the hand completes only when every payout is terminal.
     if (result.obligations.length > 0) {

@@ -13,70 +13,7 @@
  * only.
  */
 
-import type { FiberGateway } from "@fiber-poker/fiber-adapter";
-import {
-  paymentHashFor,
-  type Obligation,
-  type PaymentRequest,
-  type SettlementAdapter,
-  type SettlementRef,
-  type SettlementStatus,
-} from "./types.ts";
-
-interface HeldEntry {
-  ref: SettlementRef;
-  obligation: Obligation;
-  paymentHash: string;
-  status: SettlementStatus;
-}
-
-export class HoldInvoiceSettlement implements SettlementAdapter {
-  readonly name = "hold-invoice-experimental";
-  private entries = new Map<string, HeldEntry>();
-  private paymentHandler: ((req: PaymentRequest) => void) | null = null;
-
-  constructor(private readonly gateway: FiberGateway) {}
-
-  onPaymentRequest(handler: (req: PaymentRequest) => void): void {
-    this.paymentHandler = handler;
-  }
-
-  async reserveOrPay(obligation: Obligation): Promise<SettlementRef> {
-    const existing = this.entries.get(obligation.obligationId);
-    if (existing) return existing.ref;
-    const paymentHash = paymentHashFor(obligation);
-    const ref: SettlementRef = { adapter: this.name, id: obligation.obligationId };
-    const entry: HeldEntry = { ref, obligation, paymentHash, status: "HELD" };
-    this.entries.set(obligation.obligationId, entry);
-    if (obligation.direction === "PLAYER_TO_TABLE") {
-      this.paymentHandler?.({ ref, obligation, paymentHash });
-    }
-    return ref;
-  }
-
-  async getStatus(ref: SettlementRef): Promise<SettlementStatus> {
-    return this.entries.get(ref.id)?.status ?? "PLANNED";
-  }
-
-  /** Release a held obligation when the poker outcome commits it. */
-  async finalize(ref: SettlementRef): Promise<void> {
-    const entry = this.entries.get(ref.id);
-    if (entry && entry.status === "HELD") entry.status = "SUCCEEDED";
-  }
-
-  /** Cancel a held obligation when the hand voids it. */
-  async cancel(ref: SettlementRef, reason: string): Promise<void> {
-    const entry = this.entries.get(ref.id);
-    if (entry && entry.status === "HELD") {
-      entry.status = "CANCELLED";
-      void reason;
-    }
-  }
-
-  entryFor(obligationId: string): HeldEntry | undefined {
-    return this.entries.get(obligationId);
-  }
-}
+import type { Obligation, PaymentRequest, SettlementAdapter, SettlementRef, SettlementStatus } from "./types.ts";
 
 /**
  * Placeholder for the long-term generalized CKB poker state channel

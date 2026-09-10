@@ -7,8 +7,8 @@ export interface TableServerConfig {
   port: number;
   host: string;
   dataDir: string;
-  /** fake | fiber */
-  settlement: "fake" | "fiber";
+  /** fake (dev/CI) | fiber (immediate) | hold (experimental hold invoices) */
+  settlement: "fake" | "fiber" | "hold";
   /** FNN RPC endpoint when settlement = fiber. */
   fnnUrl?: string;
   fnnToken?: string;
@@ -26,6 +26,8 @@ export interface TableServerConfig {
   /** Rate limits. */
   rateLimitPerSecond: number;
   maxMessageBytes: number;
+  /** Max wait for one settlement obligation to reach commit-able status. */
+  settlementTimeoutMs: number;
 }
 
 function env(name: string): string | undefined {
@@ -50,7 +52,7 @@ export function loadConfig(overrides: Partial<TableServerConfig> = {}): TableSer
     port: envInt("FIBER_POKER_PORT", 8080),
     host: env("FIBER_POKER_HOST") ?? "127.0.0.1",
     dataDir: env("FIBER_POKER_DATA_DIR") ?? join(process.cwd(), ".data", "table"),
-    settlement: (env("FIBER_POKER_SETTLEMENT") as "fake" | "fiber") ?? "fake",
+    settlement: (env("FIBER_POKER_SETTLEMENT") as "fake" | "fiber" | "hold") ?? "fake",
     fnnUrl: env("FIBER_POKER_FNN_URL"),
     fnnToken: env("FIBER_POKER_FNN_TOKEN"),
     autoPay: envBool("FIBER_POKER_AUTO_PAY", true),
@@ -63,6 +65,7 @@ export function loadConfig(overrides: Partial<TableServerConfig> = {}): TableSer
     snapshotEvery: envInt("FIBER_POKER_SNAPSHOT_EVERY", 200),
     rateLimitPerSecond: envInt("FIBER_POKER_RATE_LIMIT", 20),
     maxMessageBytes: envInt("FIBER_POKER_MAX_MESSAGE_BYTES", 64 * 1024),
+    settlementTimeoutMs: envInt("FIBER_POKER_SETTLEMENT_TIMEOUT_MS", 120_000),
     ...overrides,
   };
   return cfg;

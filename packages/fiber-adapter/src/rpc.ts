@@ -170,6 +170,16 @@ export class FiberRpcClient {
     return call(this.opts, "get_invoice", req);
   }
 
+  /** Hold-invoice settlement: reveal the preimage to complete the payment. */
+  settleInvoice(req: { payment_hash: string; payment_preimage: string }): Promise<null> {
+    return call(this.opts, "settle_invoice", req);
+  }
+
+  /** Cancel an open/received invoice (payer funds are released). */
+  cancelInvoice(req: { payment_hash: string }): Promise<null> {
+    return call(this.opts, "cancel_invoice", req);
+  }
+
   /** Convenience: wait until the channel with `peerPubkey` reports ChannelReady. */
   async waitChannelReady(peerPubkey: string, timeoutMs = 120_000, pollMs = 500): Promise<FiberChannel> {
     const deadline = Date.now() + timeoutMs;

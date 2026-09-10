@@ -42,14 +42,14 @@ export class FakeSettlementAdapter implements SettlementAdapter {
   private faults = new Map<string, { mode: FaultMode; failuresLeft?: number }>();
   /** Prefix currently matching an entry (to consume budget on its poll). */
   private entryFaultPrefix = new Map<string, string>();
-  private paymentHandler: ((req: PaymentRequest) => void) | null = null;
+  private paymentHandlers = new Set<(req: PaymentRequest) => void>();
   /** Global default mode (used when no per-obligation fault set). */
   defaultMode: FaultMode = "success";
   /** When true, PLAYER_TO_TABLE requests resolve automatically (dev/demo). */
   autoPayPlayerPayments = true;
 
   onPaymentRequest(handler: (req: PaymentRequest) => void): void {
-    this.paymentHandler = handler;
+    this.paymentHandlers.add(handler);
   }
 
   /** Schedule a fault for obligations matching an id prefix ("hand-3:…").
@@ -107,7 +107,7 @@ export class FakeSettlementAdapter implements SettlementAdapter {
 
     if (obligation.direction === "PLAYER_TO_TABLE") {
       const req: PaymentRequest = { ref, obligation, paymentHash: entry.paymentHash };
-      this.paymentHandler?.(req);
+      for (const handler of this.paymentHandlers) handler(req);
       if (this.autoPayPlayerPayments) {
         this.playerPaid(obligation.obligationId);
       }

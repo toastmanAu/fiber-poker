@@ -103,19 +103,37 @@ export class RealFiberGateway implements FiberGateway {
     return { paymentHash: inv.invoice.data.payment_hash };
   }
 
-  async invoiceStatus(paymentHash: string): Promise<"Open" | "Paid" | "Cancelled" | "Expired" | "Unknown"> {
+  async invoiceStatus(paymentHash: string): Promise<"Open" | "Received" | "Paid" | "Cancelled" | "Expired" | "Unknown"> {
     try {
       const inv = await this.rpc.getInvoice({ payment_hash: paymentHash });
-      // v0.9.0 "Received" (held, not settled) maps onto our Paid-adjacent
-      // set; only "Paid" counts as collectible for settlement purposes.
-      if (inv.status === "Paid" || inv.status === "Received") return "Paid";
-      if (inv.status === "Open" || inv.status === "Cancelled" || inv.status === "Expired") {
+      if (inv.status === "Paid" || inv.status === "Received" || inv.status === "Open" || inv.status === "Cancelled" || inv.status === "Expired") {
         return inv.status;
       }
       return "Unknown";
     } catch {
       return "Unknown";
     }
+  }
+
+  /**
+   * Hold invoice: created with H(preimage) as its payment hash. Verify the
+   * settle/cancel semantics against the pinned FNN build on devnet before
+   * production use (docs/fnn-compat.md — settle_invoice / cancel_invoice).
+   */
+  async createHoldInvoice(amount: bigint, preimageHash: string): Promise<{ paymentHash: string }> {
+    const inv = await this.rpc.newInvoice({
+      amount,
+      payment_hash: `0x${preimageHash.replace(/^0x/, "")}`,
+    });
+    return { paymentHash: inv.invoice.data.payment_hash };
+  }
+
+  async settleInvoice(paymentHash: string, preimage: string): Promise<void> {
+    await this.rpc.settleInvoice({ payment_hash: paymentHash, payment_preimage: `0x${Buffer.from(preimage).toString("hex")}` });
+  }
+
+  async cancelInvoice(paymentHash: string): Promise<void> {
+    await this.rpc.cancelInvoice({ payment_hash: paymentHash });
   }
 
   async sendToPeer(targetPubkey: string, amount: bigint, paymentHash?: string): Promise<{ paymentHash: string }> {

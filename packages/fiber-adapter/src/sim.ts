@@ -14,7 +14,7 @@ import { toHex } from "./hex.ts";
 import type { FiberGateway } from "./gateway.ts";
 
 export type SimPaymentStatus = "Created" | "Inflight" | "Success" | "Failed";
-export type SimInvoiceStatus = "Open" | "Paid" | "Cancelled" | "Expired";
+export type SimInvoiceStatus = "Open" | "Received" | "Paid" | "Cancelled" | "Expired";
 
 interface SimPayment {
   paymentHash: string;
@@ -32,6 +32,10 @@ interface SimInvoice {
   to: string;
   amount: bigint;
   status: SimInvoiceStatus;
+  /** Hold invoice: payer funds are received-but-not-settled until the payee
+   *  settles (reveals the preimage) or cancels. */
+  hold?: boolean;
+  preimageHash?: string;
 }
 
 interface SimChannel {
@@ -161,10 +165,22 @@ export class SimulatedFiberNetwork {
     return ch.channelId;
   }
 
-  createInvoice(node: string, amount: bigint, paymentHash?: string): { paymentHash: string } {
+  createInvoice(
+    node: string,
+    amount: bigint,
+    paymentHash?: string,
+    opts?: { hold?: boolean; preimageHash?: string },
+  ): { paymentHash: string } {
     this.assertOnline(node);
     const hash = paymentHash ?? toHex(ckbHash(new TextEncoder().encode(`inv-${node}-${++this.paymentCounter}`)));
-    this.invoices.set(hash, { paymentHash: hash, to: node, amount, status: "Open" });
+    this.invoices.set(hash, {
+      paymentHash: hash,
+      to: node,
+      amount,
+      status: "Open",
+      hold: opts?.hold ?? false,
+      preimageHash: opts?.preimageHash,
+    });
     return { paymentHash: hash };
   }
 
@@ -176,7 +192,50 @@ export class SimulatedFiberNetwork {
     const ch = this.channelBetween(payer, inv.to);
     if (!ch) throw new Error(`no channel between ${payer.slice(0, 8)}… and ${inv.to.slice(0, 8)}…`);
     this.route(payer, inv.to, ch, inv.amount);
+    if (inv.hold) {
+      // Funds are locked in the channel toward the payee but NOT settled:
+      // the invoice sits in "Received" until settle_invoice / cancel_invoice.
+      inv.status = "Received";
+      this.payments.set(`held:${paymentHash}`, {
+        paymentHash,
+        from: payer,
+        to: inv.to,
+        amount: inv.amount,
+        status: "Inflight",
+        latencyTicks: 0,
+      });
+    } else {
+      inv.status = "Paid";
+    }
+  }
+
+  /** Payee settles a held invoice by revealing the preimage. */
+  settleInvoice(paymentHash: string, preimage: string): void {
+    const inv = this.invoices.get(paymentHash);
+    if (!inv) throw new Error(`unknown invoice ${paymentHash}`);
+    if (inv.status !== "Received") throw new Error(`invoice not settleable from status ${inv.status}`);
+    if (!inv.preimageHash) throw new Error("invoice is not a hold invoice");
+    const digest = toHex(ckbHash(new TextEncoder().encode(preimage)));
+    if (digest !== inv.preimageHash) throw new Error("preimage does not hash to the invoice payment hash");
     inv.status = "Paid";
+    const held = this.payments.get(`held:${paymentHash}`);
+    if (held) held.status = "Success";
+  }
+
+  /** Payee cancels a held (or open) invoice: funds return to the payer. */
+  cancelInvoice(paymentHash: string): void {
+    const inv = this.invoices.get(paymentHash);
+    if (!inv) throw new Error(`unknown invoice ${paymentHash}`);
+    if (inv.status !== "Open" && inv.status !== "Received") {
+      throw new Error(`invoice not cancellable from status ${inv.status}`);
+    }
+    const wasReceived = inv.status === "Received";
+    inv.status = "Cancelled";
+    const held = this.payments.get(`held:${paymentHash}`);
+    if (held && wasReceived) {
+      held.status = "Failed";
+      held.error = "hold invoice cancelled";
+    }
   }
 
   /** Keysend-style direct payment with a sender-chosen payment hash. */
@@ -236,7 +295,7 @@ export class SimulatedFiberNetwork {
   }
 
   paymentStatus(paymentHash: string): SimPayment {
-    const p = this.payments.get(paymentHash);
+    const p = this.payments.get(paymentHash) ?? this.payments.get(`held:${paymentHash}`);
     if (!p) throw new Error(`unknown payment ${paymentHash}`);
     return p;
   }
@@ -316,6 +375,31 @@ export class SimulatedFiberNetwork {
     };
     ch.state = "ShuttingDown";
     this.closures.push({ channelId, closer, mode: "force" });
+  }
+
+  /**
+   * Move on-chain funds into one side of a channel — the simulator's
+   * equivalent of accepting a channel with your own funding amount. Needed
+   * for player->table payments when the table opened the channel.
+   */
+  fundChannelSide(channelId: string, node: string, amount: bigint): void {
+    const ch = this.channelById(channelId);
+    if (!ch) throw new Error(`unknown channel ${channelId}`);
+    if (ch.state !== "ChannelReady") throw new Error(`channel ${channelId} not ready`);
+    const n = this.nodes.get(node);
+    if (!n) throw new Error(`unknown node ${node}`);
+    if (n.balance < amount) throw new Error("insufficient on-chain balance to fund channel side");
+    n.balance -= amount;
+    if (ch.nodeA === node) ch.balanceA += amount;
+    else ch.balanceB += amount;
+    ch.version += 1;
+    this.witness(channelId, ch.version);
+  }
+
+  /** Latest ChannelReady channel between a node and a peer. */
+  channelBetweenNodes(a: string, b: string): { channelId: string } | undefined {
+    const ch = this.channelBetween(a, b);
+    return ch ? { channelId: ch.channelId } : undefined;
   }
 
   /** Test helper: push balances around without payments. */
@@ -429,6 +513,13 @@ export class SimNodeGateway implements FiberGateway {
     this.net.shutdownChannel(channelId, { force: opts?.force ?? false, claimedVersion: opts?.claimedVersion, delayTicks: opts?.delayTicks, closer: this.pubkey });
   }
 
+  /** Accept-side funding: move on-chain funds into this node's channel side. */
+  async fundChannelTo(peerPubkey: string, amount: bigint): Promise<void> {
+    const ch = this.net.channelsOf(this.pubkey).find((c) => c.nodeA === peerPubkey || c.nodeB === peerPubkey);
+    if (!ch) throw new Error(`no channel to ${peerPubkey.slice(0, 8)}…`);
+    this.net.fundChannelSide(ch.channelId, this.pubkey, amount);
+  }
+
   /** Commitment version this node sees for its channel with `peerPubkey`. */
   async commitmentVersionTo(peerPubkey: string): Promise<number | undefined> {
     const ch = this.net.channelsOf(this.pubkey).find((c) => (c.nodeA === peerPubkey || c.nodeB === peerPubkey));
@@ -449,8 +540,20 @@ export class SimNodeGateway implements FiberGateway {
     return this.net.createInvoice(this.pubkey, amount, paymentHash);
   }
 
-  async invoiceStatus(paymentHash: string): Promise<"Open" | "Paid" | "Cancelled" | "Expired" | "Unknown"> {
+  async invoiceStatus(paymentHash: string): Promise<"Open" | "Received" | "Paid" | "Cancelled" | "Expired" | "Unknown"> {
     return this.net.invoiceStatus(paymentHash).status;
+  }
+
+  async createHoldInvoice(amount: bigint, preimageHash: string): Promise<{ paymentHash: string }> {
+    return this.net.createInvoice(this.pubkey, amount, preimageHash, { hold: true, preimageHash });
+  }
+
+  async settleInvoice(paymentHash: string, preimage: string): Promise<void> {
+    this.net.settleInvoice(paymentHash, preimage);
+  }
+
+  async cancelInvoice(paymentHash: string): Promise<void> {
+    this.net.cancelInvoice(paymentHash);
   }
 
   /** The simulator marks direct payments terminal synchronously. */

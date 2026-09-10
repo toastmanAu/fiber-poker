@@ -46,7 +46,7 @@ export class ImmediateFiberSettlement implements SettlementAdapter {
   /** Entries keyed by ref.id; obligationId maps to the latest attempt. */
   private entries = new Map<string, Entry>();
   private byObligation = new Map<string, Entry>();
-  private paymentHandler: ((req: PaymentRequest) => void) | null = null;
+  private paymentHandlers = new Set<(req: PaymentRequest) => void>();
   private pollMs: number;
   private timeoutMs: number;
 
@@ -59,7 +59,7 @@ export class ImmediateFiberSettlement implements SettlementAdapter {
   }
 
   onPaymentRequest(handler: (req: PaymentRequest) => void): void {
-    this.paymentHandler = handler;
+    this.paymentHandlers.add(handler);
   }
 
   async reserveOrPay(obligation: Obligation): Promise<SettlementRef> {
@@ -80,11 +80,9 @@ export class ImmediateFiberSettlement implements SettlementAdapter {
       // the invoice, the transcript, and the event log all agree.
       await this.gateway.createInvoice(BigInt(obligation.amountShannons), paymentHash);
       entry.status = "INFLIGHT";
-      this.paymentHandler?.({
-        ref,
-        obligation,
-        paymentHash,
-      });
+      for (const handler of this.paymentHandlers) {
+        handler({ ref, obligation, paymentHash });
+      }
       this.pollInBackground(entry).catch(() => {
         entry.status = "FAILED";
         entry.error = "poll error";

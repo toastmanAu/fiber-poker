@@ -37,7 +37,8 @@ npm test
 | `FIBER_POKER_PORT` | `8080` | WebSocket port |
 | `FIBER_POKER_HOST` | `127.0.0.1` | Bind address |
 | `FIBER_POKER_DATA_DIR` | `.data/table` | Server key + event log + snapshots |
-| `FIBER_POKER_SETTLEMENT` | `fake` | `fake` (dev/CI) or `fiber` (FNN JSON-RPC) |
+| `FIBER_POKER_SETTLEMENT` | `fake` | `fake` (dev/CI), `fiber` (immediate FNN), or `hold` (experimental hold invoices, P9) |
+| `FIBER_POKER_SETTLEMENT_TIMEOUT_MS` | `120000` | Max wait for one obligation to reach commit-able status |
 | `FIBER_POKER_FNN_URL` | – | FNN RPC URL when settlement=fiber |
 | `FIBER_POKER_FNN_TOKEN` | – | FNN auth token (server-side only!) |
 | `FIBER_POKER_TURN_TIMEOUT_MS` | `30000` | Turn timer; expiry = check if legal else fold |
@@ -69,6 +70,12 @@ tests/
 docs/             protocol spec, threat model, FNN compatibility note
 infra/            devnet / FNN / watchtower configuration templates
 ```
+
+## Settlement modes
+
+- **fake** (default): in-memory settlement with fault injection. Dev/CI only; the UI labels it.
+- **fiber**: immediate settlement — every obligation fully settles before its action commits.
+- **hold** (experimental, P9): the table creates a *hold invoice* bound to `H(preimage)`; the player pays it, the funds **lock** (invoice `Received`) without becoming final, and only then does the action commit. At hand end the table settles every held invoice; on abort it cancels them and the funds return to the players **by protocol** — refunds stop depending on table goodwill. Limits: the hold condition is still payment-hash/preimage; it does not evaluate poker or create six-party escrow. Payouts remain immediate. See `docs/threat-model.md` and `docs/fnn-compat.md` (verify `settle_invoice`/`cancel_invoice` against your pinned FNN build).
 
 ## The one rule that matters
 

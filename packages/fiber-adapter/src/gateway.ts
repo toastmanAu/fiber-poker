@@ -30,7 +30,13 @@ export interface FiberGateway {
   /** Payee-side: create an invoice the player can pay, bound to a specific
    *  payment hash when given (correlation with the poker transcript). */
   createInvoice(amount: bigint, paymentHash?: string): Promise<{ paymentHash: string }>;
-  invoiceStatus(paymentHash: string): Promise<"Open" | "Paid" | "Cancelled" | "Expired" | "Unknown">;
+  invoiceStatus(paymentHash: string): Promise<"Open" | "Received" | "Paid" | "Cancelled" | "Expired" | "Unknown">;
+  /** Hold invoice: created with H(preimage); payer funds lock at "Received". */
+  createHoldInvoice?(amount: bigint, preimageHash: string): Promise<{ paymentHash: string }>;
+  /** Payee settles a held invoice by revealing the preimage. */
+  settleInvoice?(paymentHash: string, preimage: string): Promise<void>;
+  /** Payee cancels a held/open invoice; payer funds are released. */
+  cancelInvoice?(paymentHash: string): Promise<void>;
   /** Payer-side: keysend-style direct payment to a peer's pubkey. */
   sendToPeer(targetPubkey: string, amount: bigint, paymentHash?: string): Promise<{ paymentHash: string }>;
   paymentStatus(paymentHash: string): Promise<"Created" | "Inflight" | "Success" | "Failed" | "Unknown">;

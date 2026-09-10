@@ -88,6 +88,21 @@ default exit.
   persisted; reopening requires the explicit operator path
   (`resolveClosure`) — never "continue and hope".
 
+## Hold-invoice mode (experimental, P9)
+
+In immediate mode, a player's bet is fully settled before the action
+commits; if the hand later aborts, the refund depends on the table's
+willingness and ability to pay. Hold-invoice mode improves exactly that:
+the bet locks as a held invoice (funds frozen in the channel, invoice
+`Received`) before commit, and the hand-completion policy settles held
+invoices while the abort policy cancels them — the funds return to the
+player by protocol, enforced by the fiber layer.
+
+What hold mode does NOT do: it does not evaluate Texas Hold'em, does not
+escrow a six-way pot, and does not remove the table's authority over
+settlement decisions. It is reversible-settlement for player->table
+obligations only; payouts remain immediate.
+
 ## Dispute evidence (ACK_STATE)
 
 Clients acknowledge every verified state commit (`ACK_STATE { sequence,

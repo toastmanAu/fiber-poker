@@ -97,6 +97,28 @@ export function paymentHashFor(obligation: Obligation): string {
   );
 }
 
+/**
+ * Hold-mode preimage: derived deterministically from the obligation so the
+ * table can always settle its own held invoices, yet kept OUT of logs
+ * (docs/07: no preimages in logs). Note: the payment hash of a hold invoice
+ * is therefore H(preimage), NOT paymentHashFor(obligation); correlation is
+ * carried by the obligationId in the event log / custom records.
+ */
+export function holdPreimageFor(obligation: Obligation): string {
+  return toHex(
+    ckbHash(
+      new TextEncoder().encode(
+        `FIBER_POKER/HOLD_PREIMAGE/V1:${obligation.tableId}:${obligation.handId}:${obligation.obligationId}`,
+      ),
+    ),
+  );
+}
+
+/** payment_hash = H(preimage) for a hold obligation. */
+export function holdInvoiceHashFor(obligation: Obligation): string {
+  return toHex(ckbHash(new TextEncoder().encode(holdPreimageFor(obligation))));
+}
+
 function toHex(bytes: Uint8Array): string {
   let out = "";
   for (const b of bytes) out += b.toString(16).padStart(2, "0");

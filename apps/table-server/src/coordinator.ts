@@ -36,15 +36,26 @@ export class SettlementCoordinator {
   readonly inflight = new Map<string, { obligation: Obligation; ref: SettlementRef }>();
   private retries: number;
   private retryDelayMs: number;
+  private awaitTimeoutMs: number;
+  /**
+   * Hold mode: player->table obligations commit once the payment is HELD
+   * (invoice Received) rather than final. Held refs are registered per hand
+   * and released by finalizeHand() / cancelled by cancelHand().
+   */
+  readonly holdMode: boolean;
+  /** handId -> held refs awaiting the hand-completion policy. */
+  private heldByHand = new Map<string, { ref: SettlementRef; obligationId: string }[]>();
 
   constructor(
     private readonly adapter: SettlementAdapter,
     private readonly events: EventStore,
     private readonly notify: (playerId: string, message: unknown) => void,
-    opts?: { retries?: number; retryDelayMs?: number },
+    opts?: { retries?: number; retryDelayMs?: number; awaitTimeoutMs?: number; holdMode?: boolean },
   ) {
     this.retries = opts?.retries ?? 3;
     this.retryDelayMs = opts?.retryDelayMs ?? 250;
+    this.awaitTimeoutMs = opts?.awaitTimeoutMs ?? 120_000;
+    this.holdMode = opts?.holdMode ?? false;
     this.adapter.onPaymentRequest((req) => this.onPaymentRequest(req));
   }
 
@@ -119,7 +130,28 @@ export class SettlementCoordinator {
       });
       this.inflight.set(obligation.obligationId, { obligation, ref });
 
-      const status = await this.awaitTerminal(ref);
+      const status = this.holdMode && obligation.direction === "PLAYER_TO_TABLE"
+        ? await this.awaitHeldOrTerminal(ref)
+        : await this.awaitTerminal(ref);
+      if (status === "HELD") {
+        // Hold mode: liquidity is locked; the action may commit. Release or
+        // cancel happens under the hand-completion policy.
+        this.heldByHand.set(obligation.handId, [
+          ...(this.heldByHand.get(obligation.handId) ?? []),
+          { ref, obligationId: obligation.obligationId },
+        ]);
+        this.inflight.delete(obligation.obligationId);
+        await this.events.append({
+          tableId: obligation.tableId,
+          handId: obligation.handId || null,
+          sequence: obligation.sequence,
+          eventType: obligation.direction === "PLAYER_TO_TABLE" ? "PaymentSucceeded" : "PayoutSucceeded",
+          createdAt: new Date().toISOString(),
+          payload: { obligationId: obligation.obligationId, attempt, status: "HELD" },
+          fiberRef: ref.id,
+        });
+        return "SETTLED";
+      }
       if (status === "SUCCEEDED") {
         await this.events.append({
           tableId: obligation.tableId,
@@ -150,8 +182,8 @@ export class SettlementCoordinator {
     return "FAILED";
   }
 
-  private async awaitTerminal(ref: SettlementRef, timeoutMs = 120_000): Promise<string> {
-    const deadline = Date.now() + timeoutMs;
+  private async awaitTerminal(ref: SettlementRef, timeoutMs?: number): Promise<string> {
+    const deadline = Date.now() + (timeoutMs ?? this.awaitTimeoutMs);
     for (;;) {
       const status = await this.adapter.getStatus(ref);
       if (status === "SUCCEEDED" || status === "FAILED" || status === "CANCELLED") return status;
@@ -161,6 +193,68 @@ export class SettlementCoordinator {
       }
       await new Promise((r) => setTimeout(r, 50));
     }
+  }
+
+  private async awaitHeldOrTerminal(ref: SettlementRef): Promise<string> {
+    const deadline = Date.now() + this.awaitTimeoutMs;
+    for (;;) {
+      const status = await this.adapter.getStatus(ref);
+      if (status === "HELD" || status === "SUCCEEDED" || status === "FAILED" || status === "CANCELLED") return status;
+      if (Date.now() > deadline) {
+        await this.adapter.cancel?.(ref, "coordinator timeout");
+        return "FAILED";
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  /**
+   * Hand-completion policy (hold mode): settle every held invoice for the
+   * hand — the chips genuinely enter the pot and payouts can flow.
+   */
+  async finalizeHand(handId: string): Promise<{ settled: number; failed: string[] }> {
+    const held = this.heldByHand.get(handId) ?? [];
+    const failed: string[] = [];
+    let settled = 0;
+    for (const { ref, obligationId } of held) {
+      try {
+        await this.adapter.finalize?.(ref, undefined);
+        settled += 1;
+      } catch (e) {
+        failed.push(`${obligationId}: ${String(e)}`);
+      }
+    }
+    this.heldByHand.delete(handId);
+    await this.events.append({
+      tableId: this.tableId(),
+      handId: handId || null,
+      sequence: null,
+      eventType: "SettlementPlanned",
+      createdAt: new Date().toISOString(),
+      payload: { policy: "hold-finalize", settled, failed },
+      fiberRef: null,
+    });
+    return { settled, failed };
+  }
+
+  /**
+   * Abort policy (hold mode): cancel every held invoice for the hand —
+   * funds return to the payers by protocol, so refund obligations must NOT
+   * also be paid (that would double-pay).
+   */
+  async cancelHand(handId: string): Promise<number> {
+    const held = this.heldByHand.get(handId) ?? [];
+    let cancelled = 0;
+    for (const { ref } of held) {
+      await this.adapter.cancel?.(ref, "hand aborted");
+      cancelled += 1;
+    }
+    this.heldByHand.delete(handId);
+    return cancelled;
+  }
+
+  heldCountFor(handId: string): number {
+    return (this.heldByHand.get(handId) ?? []).length;
   }
 
   /** Reconciliation hook for recovery: resolve a pending operation by ref. */

@@ -151,3 +151,10 @@ Value-changing actions carry a settlement obligation correlated by
 `PaymentInflight` (with the Fiber payment hash) → `PaymentSucceeded` /
 `PaymentFailed` in the event log, and only then commits the poker action.
 See `docs/fnn-compat.md` for the exact FNN v0.9.0 RPC mapping.
+
+In experimental hold mode, the payment hash of a player->table obligation
+is `H(holdPreimage)` where `holdPreimage` is derived deterministically
+from the obligation id (never logged). The action commits when the invoice
+reaches `Received` (funds held); `settle_invoice` fires for every held
+invoice at hand completion, `cancel_invoice` on abort. Correlation still
+travels via the obligationId in the event log.
