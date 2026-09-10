@@ -544,8 +544,11 @@ export class SimNodeGateway implements FiberGateway {
     return this.net.invoiceStatus(paymentHash).status;
   }
 
-  async createHoldInvoice(amount: bigint, preimageHash: string): Promise<{ paymentHash: string }> {
-    return this.net.createInvoice(this.pubkey, amount, preimageHash, { hold: true, preimageHash });
+  async createHoldInvoice(amount: bigint, preimage: string): Promise<{ paymentHash: string }> {
+    // Sim semantics: the "preimage" argument is used as the hash key. The
+    // sim settles only via explicit settleInvoice (no auto-settle), unlike
+    // rc7 which auto-settles when the payee knows the preimage.
+    return this.net.createInvoice(this.pubkey, amount, preimage, { hold: true, preimageHash: preimage });
   }
 
   async settleInvoice(paymentHash: string, preimage: string): Promise<void> {

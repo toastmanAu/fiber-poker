@@ -6,7 +6,15 @@
  * state_name is "ChannelReady".
  */
 
-import { parseAmount } from "./hex.ts";
+import { parseAmount, toHex } from "./hex.ts";
+import { ckbHash } from "@fiber-poker/protocol";
+
+function random32Hex(): string {
+  const b = new Uint8Array(32);
+  crypto.getRandomValues(b);
+  return toHex(b);
+}
+void ckbHash;
 import { FiberRpcClient, type FiberChannel } from "./rpc.ts";
 import type { FiberGateway, GatewayChannel } from "./gateway.ts";
 
@@ -97,11 +105,19 @@ export class RealFiberGateway implements FiberGateway {
     await this.rpc.shutdownChannel({ channel_id: channelId, force: opts?.force ?? false });
   }
 
-  async createInvoice(amount: bigint, paymentHash?: string): Promise<{ paymentHash: string }> {
+  /**
+   * rc7-verified flow (2026-09-10 live node): the invoice MUST be created
+   * from the payee's own `payment_preimage` — a payment_hash-only invoice
+   * can never be settled (the payee lacks the preimage) and sits at
+   * `Received` until cancelled. fnn auto-settles a preimage invoice when
+   * the TLC arrives, so this is the immediate-settlement primitive.
+   */
+  async createInvoice(amount: bigint): Promise<{ paymentHash: string }> {
+    const preimage = random32Hex();
     const inv = await this.rpc.newInvoice({
       amount,
       currency: this.opts.currency ?? "Fibt",
-      ...(paymentHash ? { payment_hash: `0x${paymentHash.replace(/^0x/, "")}` } : {}),
+      payment_preimage: preimage,
     });
     return { paymentHash: inv.invoice.data.payment_hash };
   }
@@ -123,11 +139,15 @@ export class RealFiberGateway implements FiberGateway {
    * settle/cancel semantics against the pinned FNN build on devnet before
    * production use (docs/fnn-compat.md — settle_invoice / cancel_invoice).
    */
-  async createHoldInvoice(amount: bigint, preimageHash: string): Promise<{ paymentHash: string }> {
+  /**
+   * Hold invoice: created from the payee's preimage (rc7 hold form).
+   * Payer funds lock at `Received`; settle with settleInvoice(preimage).
+   */
+  async createHoldInvoice(amount: bigint, preimage: string): Promise<{ paymentHash: string }> {
     const inv = await this.rpc.newInvoice({
       amount,
       currency: this.opts.currency ?? "Fibt",
-      payment_hash: `0x${preimageHash.replace(/^0x/, "")}`,
+      payment_preimage: preimage.startsWith("0x") ? preimage : `0x${preimage}`,
     });
     return { paymentHash: inv.invoice.data.payment_hash };
   }

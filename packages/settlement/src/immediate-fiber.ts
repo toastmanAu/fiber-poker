@@ -76,9 +76,12 @@ export class ImmediateFiberSettlement implements SettlementAdapter {
     this.byObligation.set(obligation.obligationId, entry);
 
     if (obligation.direction === "PLAYER_TO_TABLE") {
-      // Create the invoice bound to the deterministic correlation hash so
-      // the invoice, the transcript, and the event log all agree.
-      await this.gateway.createInvoice(BigInt(obligation.amountShannons), paymentHash);
+      // rc7 flow: the invoice is created from the payee's own preimage and
+      // auto-settles when the payer's TLC arrives. Correlation with the
+      // poker transcript travels via obligationId in the event log (the
+      // old deterministic payment-hash derivation is unimplementable on
+      // rc7 — a hash-only invoice can never be settled).
+      await this.gateway.createInvoice(BigInt(obligation.amountShannons));
       entry.status = "INFLIGHT";
       for (const handler of this.paymentHandlers) {
         handler({ ref, obligation, paymentHash });

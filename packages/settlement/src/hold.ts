@@ -89,10 +89,11 @@ export class HoldInvoiceSettlement implements SettlementAdapter {
       return ref;
     }
 
-    // PLAYER_TO_TABLE: create the hold invoice bound to H(preimage).
+    // PLAYER_TO_TABLE: create the hold invoice from the payee's preimage
+    // (rc7 hold form: preimage-only creation; the response carries the
+    // payment hash — it cannot be precomputed from the obligation).
     const preimage = holdPreimageFor(obligation);
-    const preimageHash = holdInvoiceHashFor(obligation);
-    const { paymentHash } = await this.gateway.createHoldInvoice!(BigInt(obligation.amountShannons), preimageHash);
+    const { paymentHash } = await this.gateway.createHoldInvoice!(BigInt(obligation.amountShannons), preimage);
     const entry: HeldEntry = {
       ref,
       obligation,
