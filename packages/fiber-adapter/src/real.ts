@@ -14,6 +14,8 @@ export interface RealFiberGatewayOptions {
   url: string;
   authToken?: string;
   timeoutMs?: number;
+  /** Invoice currency — rc7 requires it (Fibt = testnet, Fibd = devnet). */
+  currency?: "Fibb" | "Fibt" | "Fibd";
   /** Default channel options for opens. */
   channelDefaults?: {
     public?: boolean;
@@ -25,8 +27,8 @@ export interface RealFiberGatewayOptions {
 function toGatewayChannel(c: FiberChannel): GatewayChannel {
   return {
     channelId: c.channel_id,
-    peerPubkey: c.peer_pubkey,
-    stateName: c.state_name,
+    peerPubkey: c.pubkey,
+    stateName: c.state.state_name,
     localBalance: parseAmount(c.local_balance),
     remoteBalance: parseAmount(c.remote_balance),
     offeredTlcBalance: parseAmount(c.offered_tlc_balance),
@@ -51,7 +53,7 @@ export class RealFiberGateway implements FiberGateway {
   async nodePubkey(): Promise<string> {
     if (!this.pubkeyCache) {
       const info = await this.rpc.nodeInfo();
-      this.pubkeyCache = info.node_pubkey;
+      this.pubkeyCache = info.pubkey;
     }
     return this.pubkeyCache;
   }
@@ -98,6 +100,7 @@ export class RealFiberGateway implements FiberGateway {
   async createInvoice(amount: bigint, paymentHash?: string): Promise<{ paymentHash: string }> {
     const inv = await this.rpc.newInvoice({
       amount,
+      currency: this.opts.currency ?? "Fibt",
       ...(paymentHash ? { payment_hash: `0x${paymentHash.replace(/^0x/, "")}` } : {}),
     });
     return { paymentHash: inv.invoice.data.payment_hash };
@@ -123,6 +126,7 @@ export class RealFiberGateway implements FiberGateway {
   async createHoldInvoice(amount: bigint, preimageHash: string): Promise<{ paymentHash: string }> {
     const inv = await this.rpc.newInvoice({
       amount,
+      currency: this.opts.currency ?? "Fibt",
       payment_hash: `0x${preimageHash.replace(/^0x/, "")}`,
     });
     return { paymentHash: inv.invoice.data.payment_hash };

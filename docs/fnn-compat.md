@@ -479,3 +479,57 @@ Example given there: fund 499 CKB → 400 CKB usable; peer funding 250 CKB → 1
 ---
 
 *Compiled 2026-09-10. All names/shapes reflect tag `v0.9.0`; the FNN RPC is explicitly "not stable yet and may change in the future" (per the RPC reference header).*
+
+---
+
+## VERIFIED AGAINST A LIVE NODE (2026-09-10)
+
+Node: `fnn 0.9.0-rc7` (commit `bc361aa`, 2026-07-02) at `192.168.68.80:8227`,
+Biscuit-authenticated (`Authorization: Bearer <base64>`). Validated with
+`tests/fiber/live-node.test.ts` (gated suite — auth, node_info, list_channels,
+full invoice lifecycle) plus a RealFiberGateway smoke. **Four corrections to
+the desk-checked shapes above; everything else matched.**
+
+### Corrections found live
+
+1. **`node_info` returns `pubkey`, not `node_pubkey`.** `node_name` may be
+   `null`. Full observed result: `{ version: "0.9.0-rc7", commit_hash:
+   "bc361aa 2026-07-02", pubkey: "024508b9…", features: [...],
+   addresses: [multiaddr…], chain_hash: "0x…",
+   open_channel_auto_accept_min_ckb_funding_amount: "0x2540be400" (5 CKB),
+   auto_accept_channel_ckb_funding_amount: "0x24e160300" (99 CKB — the
+   channel collateral figure from §E, confirmed live), … }`.
+2. **`list_channels` entries use `pubkey`** for the peer (not
+   `peer_pubkey`) and the channel state is a **nested, adjacently-tagged
+   object**: `"state": { "state_name": "ChannelReady" }` — not a flat
+   `state_name` string. Other observed fields: `channel_outpoint`,
+   `funding_udt_type_script`, `enabled`, `pending_tlcs`, `created_at` (0x
+   unix), `latest_commitment_transaction_hash`, `failure_detail`,
+   `tlc_expiry_delta`, `tlc_fee_proportional_millionths`.
+3. **`new_invoice` REQUIRES `currency`** (`Fibb`/`Fibt`/`Fibd`) — omitting
+   it yields `-32602 Invalid params: "missing field `currency`"`. Testnet
+   invoices mint `fibt1…` invoice addresses. The full lifecycle verified
+   live: new_invoice → get_invoice (`Open`) → cancel_invoice → get_invoice
+   (`Cancelled`).
+4. Pubkey regexes: 33 bytes = **66 hex chars total** (`^(02|03)[0-9a-f]{64}$`).
+
+### Confirmed live (no changes needed)
+
+- JSON-RPC 2.0 with array-wrapped params; auth middleware order (parse error
+  `-32700` precedes auth `-32999`; missing/garbage/wrong-scheme tokens all
+  yield bare `Unauthorized`).
+- Bearer auth header form; per-method Biscuit rules (this token carries
+  read+write on peers/channels/payments/invoices and works for all probed
+  methods).
+- `0x`-prefixed hex numbers, shannon amounts, `Hash256` formats, multiaddr
+  peer addresses, PascalCase channel states (`ChannelReady` observed).
+- RealFiberGateway (auth, nodePubkey, listChannels mapping) works against
+  the live node unchanged once the four corrections above were applied.
+
+### Operational notes from the live node
+
+- The node's channels were ACCEPTED (local_balance = 0): a table node must
+  have its own funded side or payouts fail — top-up before hosting games.
+- Auto-accept is on: minimum inbound funding 5 CKB, and the node itself
+  auto-funds 99 CKB when accepting — factor into liquidity planning.
+- Peer seen: `/ip4/192.168.68.102/…` (driveThree), 2 channels, 1 peer.

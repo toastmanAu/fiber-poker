@@ -60,22 +60,37 @@ export { hexAmount, parseAmount };
 
 // --- typed method wrappers (v0.9.0 names) -----------------------------------
 
+/** Verified against live fnn 0.9.0-rc7 (2026-09-10): the pubkey field is
+ *  `pubkey` (NOT node_pubkey), node_name may be null, and the result also
+ *  carries version / commit_hash / features / addresses / chain_hash. */
 export interface NodeInfo {
-  node_name: string;
-  node_pubkey: string;
+  node_name: string | null;
+  pubkey: string;
+  version?: string;
+  commit_hash?: string;
+  features?: string[];
+  addresses?: string[];
+  chain_hash?: string;
   [k: string]: unknown;
 }
 
+/** Verified against live fnn 0.9.0-rc7: the peer field is `pubkey` and the
+ *  channel state is a nested, adjacently-tagged object
+ *  `{ state_name: "ChannelReady" | ... }` — NOT a flat state_name string. */
 export interface FiberChannel {
   channel_id: string;
-  peer_pubkey: string;
-  state_name: string;
+  pubkey: string;
+  state: { state_name: string };
   local_balance: string;
   remote_balance: string;
   offered_tlc_balance: string;
   received_tlc_balance: string;
   is_public: boolean;
   is_one_way: boolean;
+  is_acceptor?: boolean;
+  enabled?: boolean;
+  created_at?: string;
+  pending_tlcs?: unknown[];
   [k: string]: unknown;
 }
 
@@ -138,9 +153,10 @@ export class FiberRpcClient {
     });
   }
 
+  /** NOTE: live rc7 requires `currency` ("missing field `currency`"). */
   newInvoice(req: {
     amount: bigint;
-    currency?: "Fibb" | "Fibt" | "Fibd";
+    currency: "Fibb" | "Fibt" | "Fibd";
     payment_preimage?: string;
     payment_hash?: string;
     expiry?: bigint;

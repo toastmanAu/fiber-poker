@@ -32,9 +32,9 @@ d("live FNN node", () => {
   it("authenticates and answers node_info in the v0.9.0 shape", async () => {
     const rpc = client();
     const info = await rpc.nodeInfo();
-    // Compat surface (docs/fnn-compat.md): node name + 33-byte pubkey hex.
-    expect(typeof info.node_name).toBe("string");
-    expect(info.node_pubkey).toMatch(/^(02|03)[0-9a-f]{66}$/);
+    // Live rc7 shape: `pubkey` (not node_pubkey), node_name nullable.
+    expect(info.pubkey).toMatch(/^(02|03)[0-9a-f]{64}$/);
+    expect(typeof info.version).toBe("string");
   });
 
   it("rejects a bad token with the documented error envelope", async () => {
@@ -49,11 +49,11 @@ d("live FNN node", () => {
     expect(Array.isArray(channels)).toBe(true);
     for (const c of channels) {
       expect(c.channel_id).toMatch(/^0x[0-9a-f]+$/);
-      expect(typeof c.state_name).toBe("string");
-      expect(c.state_name).toMatch(/^[A-Z][A-Za-z]+$/); // PascalCase (e.g. ChannelReady)
+      expect(typeof c.state.state_name).toBe("string"); // nested, adjacently tagged
+      expect(c.state.state_name).toMatch(/^[A-Z][A-Za-z]+$/); // PascalCase (e.g. ChannelReady)
       expect(c.local_balance).toMatch(/^0x[0-9a-f]+$/);
       expect(c.remote_balance).toMatch(/^0x[0-9a-f]+$/);
-      expect(c.peer_pubkey).toMatch(/^(02|03)[0-9a-f]{66}$/);
+      expect(c.pubkey).toMatch(/^(02|03)[0-9a-f]{64}$/);
     }
   });
 
@@ -63,7 +63,7 @@ d("live FNN node", () => {
     const paymentHash = `0x${Buffer.from(
       await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`fiber-poker-live-${new Date().toISOString().slice(0, 10)}-${process.pid}`)),
     ).toString("hex")}`;
-    const inv = await rpc.newInvoice({ amount: 1_000_000n, payment_hash: paymentHash }); // 0.01 CKB
+    const inv = await rpc.newInvoice({ amount: 1_000_000n, currency: "Fibt", payment_hash: paymentHash }); // 0.01 CKB
     expect(inv.invoice_address).toBeTruthy();
     expect(inv.invoice.data.payment_hash.toLowerCase()).toBe(paymentHash);
 
