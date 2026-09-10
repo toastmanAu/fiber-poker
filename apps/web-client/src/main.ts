@@ -152,6 +152,7 @@ function renderAudit(): void {
     <div class="entry">hand <strong>${handId.slice(-12)}</strong></div>
     <div class="entry">commitment: ${audit.commitmentOk ? '<span class="ok">verified</span>' : '<span class="bad">MISMATCH</span>'}</div>
     <div class="entry">dealing: ${audit.dealingOk === true ? '<span class="ok">matches revealed deck</span>' : audit.dealingOk === false ? '<span class="bad">MISMATCH</span>' : "not fully verifiable"}</div>
+    ${audit.seedOk !== null ? `<div class="entry">seed derivation: ${audit.seedOk ? '<span class="ok">verified (multiparty)</span>' : '<span class="bad">MISMATCH</span>'}</div>` : ""}
     <div>${audit.detail}</div>
     <div class="entry" style="margin-top:6px">Note: verifies the deck was not changed after commitment. The server still saw all cards (V0).</div>`;
 }
@@ -202,7 +203,7 @@ async function start(url: string, buyIn: number): Promise<void> {
     const handId = reveal.handId;
     const audit = lastHandStart
       ? auditReveal(reveal, lastHandStart, lastBoard)
-      : { commitmentOk: false, dealingOk: null, detail: "no hand-start state captured" };
+      : { commitmentOk: false, dealingOk: null, seedOk: null, detail: "no hand-start state captured" };
     lastReveal = { reveal, audit, handId };
     renderAudit();
     pushHistory(`deck revealed ${audit.commitmentOk ? "✔" : "✘"}`);

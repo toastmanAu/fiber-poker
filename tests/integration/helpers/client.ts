@@ -12,6 +12,7 @@ import {
   buildEnvelope,
   respondToChallenge,
 } from "@fiber-poker/protocol";
+import { seedCommitment, SEED_BYTES } from "@fiber-poker/deck";
 
 export interface PublicSeatView {
   seat: number;
@@ -35,6 +36,8 @@ export class TestClient {
   private stateHash = "";
   welcome: Record<string, unknown> | null = null;
   holeCards: string[] = [];
+  /** P10: per-hand secret seeds (committed then revealed). */
+  seedSeeds = new Map<string, Uint8Array>();
   yourTurn: Record<string, unknown> | null = null;
   commits: Record<string, unknown>[] = [];
 
@@ -79,6 +82,21 @@ export class TestClient {
     }
     if (msg.type === "YOUR_TURN") {
       this.yourTurn = msg.payload as Record<string, unknown>;
+    }
+    if (msg.type === "SEED_COMMITMENT_REQUEST") {
+      // P10: generate a per-hand secret seed, commit it.
+      const handId = (msg.payload as { handId: string }).handId;
+      const seed = new Uint8Array(SEED_BYTES);
+      crypto.getRandomValues(seed);
+      this.seedSeeds.set(handId, seed);
+      this.send("SEED_COMMIT", { handId, commitment: seedCommitment(handId, this.pubkey, seed) });
+    }
+    if (msg.type === "SEED_REVEAL_REQUEST") {
+      const handId = (msg.payload as { handId: string }).handId;
+      const seed = this.seedSeeds.get(handId);
+      if (seed) {
+        this.send("SEED_REVEAL", { handId, seed: toHexLocal(seed) });
+      }
     }
     if (msg.type === "TABLE_SNAPSHOT") {
       const tip = (msg.payload as { chainTip?: { sequence: string; stateHash: string } }).chainTip;
@@ -203,4 +221,10 @@ export class TestClient {
   close(): void {
     this.ws?.close();
   }
+}
+
+function toHexLocal(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
 }

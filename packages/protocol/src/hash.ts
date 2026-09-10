@@ -17,6 +17,8 @@ export const DOMAIN_DECK_COMMIT = "FIBER_POKER/DECK_COMMIT/V1";
 export const DOMAIN_AUTH_CHALLENGE = "FIBER_POKER/AUTH_CHALLENGE/V1";
 export const DOMAIN_TABLE_COMMIT = "FIBER_POKER/TABLE_COMMIT/V1";
 export const DOMAIN_HOLE_CARDS = "FIBER_POKER/HOLE_CARDS/V1";
+export const DOMAIN_SEED = "FIBER_POKER/SEED/V1";
+export const DOMAIN_DECK_SEED = "FIBER_POKER/DECK_SEED/V1";
 
 /** ckbHash: BLAKE2b-256 with personalization "ckb-default-hash". */
 export function ckbHash(...parts: readonly Uint8Array[]): Uint8Array {

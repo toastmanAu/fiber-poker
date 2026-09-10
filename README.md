@@ -39,6 +39,8 @@ npm test
 | `FIBER_POKER_DATA_DIR` | `.data/table` | Server key + event log + snapshots |
 | `FIBER_POKER_SETTLEMENT` | `fake` | `fake` (dev/CI), `fiber` (immediate FNN), or `hold` (experimental hold invoices, P9) |
 | `FIBER_POKER_SETTLEMENT_TIMEOUT_MS` | `120000` | Max wait for one obligation to reach commit-able status |
+| `FIBER_POKER_DECK` | `server-commit-reveal` | `multiparty-seed` enables the P10 seed protocol |
+| `FIBER_POKER_SEED_TIMEOUT_MS` | `2000` | Per-phase deadline for the seed protocol |
 | `FIBER_POKER_FNN_URL` | – | FNN RPC URL when settlement=fiber |
 | `FIBER_POKER_FNN_TOKEN` | – | FNN auth token (server-side only!) |
 | `FIBER_POKER_TURN_TIMEOUT_MS` | `30000` | Turn timer; expiry = check if legal else fold |

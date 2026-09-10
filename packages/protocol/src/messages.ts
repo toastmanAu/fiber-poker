@@ -29,6 +29,8 @@ export type ClientMessageType =
   | "LEAVE_REQUEST" // {}
   | "SIT_IN" | "SIT_OUT" // {}
   | "ACK_STATE" // { stateHash, sequence }
+  | "SEED_COMMIT" // { handId, commitment } (P10 multiparty seed protocol)
+  | "SEED_REVEAL" // { handId, seed } (hex, 32 bytes)
   | "RESYNC" // { lastSequence, lastStateHash? } reconnect support
   | "PING" // {}
   | "DECK_AUDIT"; // { handId } request reveal verification material
@@ -45,6 +47,8 @@ export type ServerMessageType =
   | "SEAT_STATUS" // { playerId, phase } lifecycle transitions
   | "CHANNEL_STATUS" // { playerId, channelId?, state, balances? }
   | "HAND_START" // { handId, deckCommitment, buttonSeat, state }
+  | "SEED_COMMITMENT_REQUEST" // { handId, deadlineUnixMs } (P10)
+  | "SEED_REVEAL_REQUEST" // { handId, deadlineUnixMs } (P10)
   | "HOLE_CARDS" // { cards: string[] } (TARGETED: this connection only)
   | "YOUR_TURN" // { legalActions, callAmount, minRaiseTo, maxRaiseTo, deadlineUnixMs }
   | "PAYMENT_REQUIRED" // { paymentHash, amountShannons, reason, obligationId, invoice? } (TARGETED)

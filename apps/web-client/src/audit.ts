@@ -7,7 +7,7 @@
  * shuffle; the server sees all cards in V0.
  */
 
-import { deckFromReveal, computeCommitment, verifyReveal, type DeckReveal } from "@fiber-poker/deck";
+import { combinedSeedFor, seedCommitment, shuffleFromSeed, deckFromReveal, computeCommitment, verifyReveal, type DeckReveal } from "@fiber-poker/deck";
 import { holeCardsHash } from "@fiber-poker/protocol";
 import { cardToString, cardFromString } from "@fiber-poker/poker-engine";
 import type { PublicTableState } from "@fiber-poker/protocol";
@@ -15,6 +15,7 @@ import type { PublicTableState } from "@fiber-poker/protocol";
 export interface AuditResult {
   commitmentOk: boolean;
   dealingOk: boolean | null; // null when we cannot fully verify (insufficient info)
+  seedOk: boolean | null; // P10: multiparty seed derivation verified
   detail: string;
 }
 
@@ -24,8 +25,28 @@ export interface AuditResult {
  */
 export function auditReveal(reveal: DeckReveal, handStart: PublicTableState, finalBoard: number[]): AuditResult {
   const commitmentOk = verifyReveal(reveal) && computeCommitment(reveal.handId, reveal.permutation, reveal.nonce) === reveal.commitment;
+
+  // P10: when the reveal carries multiparty seeds, re-derive everything.
+  let seedOk: boolean | null = null;
+  const seeds = (reveal as { seeds?: { playerId: string; seed: string }[] }).seeds;
+  if (seeds && Array.isArray(seeds) && seeds.length > 0) {
+    try {
+      // 1. every seed matches its commitment? (commitments are not in the
+      // reveal payload; instead verify the permutation derives from the
+      // combined seed — commitments were broadcast pre-hand and logged)
+      const combined = combinedSeedFor(
+        reveal.handId,
+        seeds.map((s) => ({ playerId: s.playerId, seed: Uint8Array.from(s.seed.match(/.{2}/g)!.map((h) => Number.parseInt(h, 16))) })),
+      );
+      const derivedPermutation = shuffleFromSeed(combined);
+      seedOk = derivedPermutation.join(",") === reveal.permutation.join(",");
+    } catch {
+      seedOk = false;
+    }
+  }
+
   if (!commitmentOk) {
-    return { commitmentOk: false, dealingOk: null, detail: "commitment mismatch — deck reveal does not hash to the committed value" };
+    return { commitmentOk: false, dealingOk: null, seedOk, detail: "commitment mismatch — deck reveal does not hash to the committed value" };
   }
 
   try {
@@ -55,18 +76,19 @@ export function auditReveal(reveal: DeckReveal, handStart: PublicTableState, fin
       const cards = seatCards.get(s.seat) ?? [];
       const computed = holeCardsHash(reveal.handId, cards);
       if (computed !== s.holeCardsHash) {
-        return { commitmentOk: true, dealingOk: false, detail: `seat ${s.seat} hole cards do not match the revealed deck` };
+        return { commitmentOk: true, dealingOk: false, seedOk, detail: `seat ${s.seat} hole cards do not match the revealed deck` };
       }
     }
     // Verify the observed board.
     const boardStr = board.map(cardToString).join(",");
     const observedStr = finalBoard.map((c) => cardToString(cardFromString(String(c)))).join(",");
     if (boardStr !== observedStr) {
-      return { commitmentOk: true, dealingOk: false, detail: `board mismatch: revealed deck gives [${boardStr}] but table showed [${observedStr}]` };
+      return { commitmentOk: true, dealingOk: false, seedOk, detail: `board mismatch: revealed deck gives [${boardStr}] but table showed [${observedStr}]` };
     }
-    return { commitmentOk: true, dealingOk: true, detail: `commitment + dealing verified (${dealtIn.length} players, board [${boardStr}])` };
+    const seedNote = seedOk === null ? "" : seedOk ? " · seed derivation verified" : " · SEED DERIVATION MISMATCH";
+    return { commitmentOk: true, dealingOk: true, seedOk, detail: `commitment + dealing verified (${dealtIn.length} players, board [${boardStr}])${seedNote}` };
   } catch (e) {
-    return { commitmentOk: true, dealingOk: null, detail: `partial audit: ${String(e)}` };
+    return { commitmentOk: true, dealingOk: null, seedOk, detail: `partial audit: ${String(e)}` };
   }
 }
 

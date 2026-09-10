@@ -28,6 +28,10 @@ export interface TableServerConfig {
   maxMessageBytes: number;
   /** Max wait for one settlement obligation to reach commit-able status. */
   settlementTimeoutMs: number;
+  /** server-commit-reveal (V0) | multiparty-seed (P10). */
+  deck: "server-commit-reveal" | "multiparty-seed";
+  /** Per-phase deadline for the multiparty seed protocol. */
+  seedTimeoutMs: number;
 }
 
 function env(name: string): string | undefined {
@@ -66,6 +70,8 @@ export function loadConfig(overrides: Partial<TableServerConfig> = {}): TableSer
     rateLimitPerSecond: envInt("FIBER_POKER_RATE_LIMIT", 20),
     maxMessageBytes: envInt("FIBER_POKER_MAX_MESSAGE_BYTES", 64 * 1024),
     settlementTimeoutMs: envInt("FIBER_POKER_SETTLEMENT_TIMEOUT_MS", 120_000),
+    deck: (env("FIBER_POKER_DECK") as "server-commit-reveal" | "multiparty-seed") ?? "server-commit-reveal",
+    seedTimeoutMs: envInt("FIBER_POKER_SEED_TIMEOUT_MS", 2000),
     ...overrides,
   };
   return cfg;

@@ -136,26 +136,6 @@ function unbiasedBelow(randomBytes: (n: number) => Uint8Array, bound: number): n
 }
 
 /**
- * V1 placeholder: multiparty seed commit/reveal (docs/08). Deliberately not
- * implemented in V0; the interface is the seam.
- */
-export class MultiPartySeedDeck implements DeckService {
-  readonly kind = "multiparty-seed-v1";
-  private readonly reason =
-    "multiparty seed commit/reveal lands in V1 (anti-abort policy still needs design; see docs/08)";
-
-  async commitForHand(): Promise<DeckCommitment> {
-    throw new Error(`NOT_IMPLEMENTED: ${this.reason}`);
-  }
-  deckForHand(): number[] {
-    throw new Error(`NOT_IMPLEMENTED: ${this.reason}`);
-  }
-  async revealForHand(): Promise<DeckReveal> {
-    throw new Error(`NOT_IMPLEMENTED: ${this.reason}`);
-  }
-}
-
-/**
  * V2 placeholder: mental poker (Barnett–Smart style encrypted shuffles).
  * Must stay entirely outside the core Hold'em rules and settlement layers.
  */
@@ -173,3 +153,5 @@ export class MentalPokerDeck implements DeckService {
     throw new Error(`NOT_IMPLEMENTED: ${this.reason}`);
   }
 }
+
+export * from "./multiparty.ts";

@@ -41,6 +41,8 @@ export const EVENT_TYPES = [
   "TurnTimerStarted",
   "TurnTimeoutResolved",
   "StateAckRecorded",
+  "SeedProtocolStarted",
+  "SeedProtocolCompleted",
   "PlayerDisconnected",
   "ChannelShutdownRequested",
   "ChannelClosed",

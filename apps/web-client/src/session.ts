@@ -16,6 +16,7 @@ import {
   type PublicTableState,
   generateKeyPair,
 } from "@fiber-poker/protocol";
+import { seedCommitment, SEED_BYTES } from "@fiber-poker/deck";
 
 /** JSON turns `undefined` optional fields into null; canonical encoding
  *  distinguishes absent from null, so restore absent-ness before hashing. */
@@ -73,6 +74,8 @@ export class PokerSession {
   chain: ChainObservation = { sequence: 0n, stateHash: "", verifiedCount: 0, broken: false };
   tableState: PublicTableState | null = null;
   holeCards: string[] = [];
+  /** P10: per-hand secret seeds (committed then revealed). */
+  seedSeeds = new Map<string, Uint8Array>();
   yourTurn: Record<string, unknown> | null = null;
   tablePubkey = "";
   devMode = { autoPay: false, fakeSettlement: false };

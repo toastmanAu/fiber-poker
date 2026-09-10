@@ -11,7 +11,7 @@
  */
 
 import { WebSocket, WebSocketServer } from "ws";
-import { ServerCommitRevealDeck, type DeckService } from "@fiber-poker/deck";
+import { MultiPartySeedDeck, ServerCommitRevealDeck, type DeckService } from "@fiber-poker/deck";
 import type { EventStore, SnapshotStore } from "@fiber-poker/persistence";
 import {
   FiberPokerEngine,
@@ -73,7 +73,7 @@ export class TableServer {
   readonly engine = new FiberPokerEngine();
   readonly sessions = new SessionManager();
   readonly limiter: RateLimiter;
-  readonly deck: DeckService;
+  deck: DeckService;
   readonly adapter: SettlementAdapter;
   readonly events: EventStore;
   readonly snapshots: SnapshotStore;
@@ -101,6 +101,11 @@ export class TableServer {
   private monitorTimer: NodeJS.Timeout | null = null;
   /** Latest state acknowledgement per player (dispute evidence). */
   private acks = new Map<string, { sequence: string; stateHash: string; at: string }>();
+  /** P10 multiparty seed protocol state (null when idle / server deck). */
+  private seedProtocol: { handId: string; stage: "commit" | "reveal" } | null = null;
+  /** Players sat out by the seed anti-abort policy this hand. */
+  private seedSatOut = new Set<string>();
+  private seedTimers: NodeJS.Timeout[] = [];
   private startingHand = false;
   private exclusive: Promise<void> = Promise.resolve();
   private overrides: TableServerOverrides;
@@ -116,7 +121,7 @@ export class TableServer {
     };
     this.overrides = overrides;
     this.limiter = new RateLimiter(this.config.rateLimitPerSecond);
-    this.deck = overrides.deck ?? new ServerCommitRevealDeck();
+    this.deck = overrides.deck ?? new ServerCommitRevealDeck(); // replaced in start() for multiparty mode
     this.gateway = overrides.gateway !== undefined ? overrides.gateway : null;
     this.events = overrides.events!;
     this.snapshots = overrides.snapshots!;
@@ -180,6 +185,9 @@ export class TableServer {
 
   async start(): Promise<void> {
     const keys = this.overrides.keys ?? loadOrCreateServerKeys(this.config.dataDir);
+    if (!this.overrides.deck && this.config.deck === "multiparty-seed") {
+      this.deck = new MultiPartySeedDeck(keys.publicKey);
+    }
     const genesis = genesisRuntime(this.config.tableId, this.tableConfig);
     this.runtime = new TableRuntime(this.events, keys.privateKey, keys.publicKey, genesis.state, genesis.tip);
 
@@ -305,6 +313,7 @@ export class TableServer {
     this.stopped = true;
     for (const t of this.turnTimers.values()) clearTimeout(t);
     this.turnTimers.clear();
+    this.clearSeedTimers();
     // Terminate client sockets so close() does not wait on them.
     for (const session of this.sessions.onlineSessions()) {
       session.socket.terminate();
@@ -444,6 +453,12 @@ export class TableServer {
       case "SIT_IN":
       case "SIT_OUT":
         await this.runExclusive(() => this.sitInOut(socket, type === "SIT_IN"));
+        return;
+      case "SEED_COMMIT":
+        await this.runExclusive(() => this.onSeedCommit(socket, payload));
+        return;
+      case "SEED_REVEAL":
+        await this.runExclusive(() => this.onSeedReveal(socket, payload));
         return;
       case "ACK_STATE": {
         // Client state acknowledgement: durable dispute evidence. Each
@@ -732,6 +747,7 @@ export class TableServer {
 
   async maybeStartHand(): Promise<void> {
     if (this.recovering || this.startingHand) return;
+    if (this.seedProtocol) return; // P10 seed phase already running
     const phase = this.runtime.state.phase;
     if (phase !== "WAITING" && phase !== "HAND_COMPLETE") return;
 
@@ -756,16 +772,45 @@ export class TableServer {
 
       const handNo = this.runtime.state.handNo + 1;
       const handId = `${this.config.tableId}-h${handNo}-${Date.now().toString(36)}`;
+
+      // P10 multiparty seed protocol: collect commitments and reveals from
+      // every eligible player plus the table before deriving the deck.
+      if (this.deck instanceof MultiPartySeedDeck) {
+        this.deck.beginSeedProtocol(handId, eligible.map((s) => s.playerId));
+        this.seedProtocol = { handId, stage: "commit" };
+        await this.events.append({
+          tableId: this.config.tableId,
+          handId,
+          sequence: null,
+          eventType: "SeedProtocolStarted",
+          createdAt: new Date().toISOString(),
+          payload: { handId, participants: eligible.map((s) => s.playerId) },
+          fiberRef: null,
+        });
+        const deadline = Date.now() + this.config.seedTimeoutMs;
+        this.broadcast(makeMessage("SEED_COMMITMENT_REQUEST", { handId, deadlineUnixMs: deadline }));
+        this.armSeedTimer(handId, "commit");
+        return; // hand start continues via advanceSeedProtocol
+      }
+
       const commitment = await this.deck.commitForHand(handId);
       const deck = this.deck.deckForHand(handId);
+      await this.beginHandWithDeck(handId, deck, commitment.commitment, stacks.size);
+    } finally {
+      this.startingHand = false;
+    }
+  }
 
+  /** Shared tail of hand setup: persist, commit START_HAND, broadcast. */
+  private async beginHandWithDeck(handId: string, deck: number[], commitmentHex: string, playerCount: number): Promise<void> {
+    {
       await this.events.append({
         tableId: this.config.tableId,
         handId,
         sequence: null,
         eventType: "HandStarted",
         createdAt: new Date().toISOString(),
-        payload: { handId, players: stacks.size },
+        payload: { handId, players: playerCount },
         fiberRef: null,
       });
       await this.events.append({
@@ -774,11 +819,11 @@ export class TableServer {
         sequence: null,
         eventType: "DeckCommitted",
         createdAt: new Date().toISOString(),
-        payload: { handId, commitment: commitment.commitment },
+        payload: { handId, commitment: commitmentHex },
         fiberRef: null,
       });
 
-      const r = await this.runtime.commit({ type: "START_HAND", handId, deck, deckCommitment: commitment.commitment });
+      const r = await this.runtime.commit({ type: "START_HAND", handId, deck, deckCommitment: commitmentHex });
       if (!r.ok) {
         console.error(`[table] START_HAND failed: ${r.code} ${r.detail}`);
         return;
@@ -786,15 +831,154 @@ export class TableServer {
       this.currentHandId = handId;
       this.broadcast(makeMessage("HAND_START", {
         handId,
-        deckCommitment: commitment.commitment,
+        deckCommitment: commitmentHex,
         state: r.result.commit.payload.state,
       }));
       this.broadcastState(r.result);
       await this.afterCommit(r.result);
-    } finally {
-      this.startingHand = false;
     }
   }
+
+  // -------------------------------------------------------------------------
+  // P10 multiparty seed protocol
+  // -------------------------------------------------------------------------
+
+  private armSeedTimer(handId: string, stage: "commit" | "reveal"): void {
+    const timer = setTimeout(() => {
+      void this.runExclusive(() => this.advanceSeedProtocol(handId, stage, true)).catch((e) => {
+        console.error(`[table] seed protocol (${stage}) failed:`, e);
+      });
+    }, this.config.seedTimeoutMs);
+    this.seedTimers.push(timer);
+  }
+
+  private clearSeedTimers(): void {
+    for (const t of this.seedTimers) clearTimeout(t);
+    this.seedTimers = [];
+  }
+
+  private async onSeedCommit(socket: WebSocket, payload: Record<string, unknown>): Promise<void> {
+    const session = this.sessions.get(socket);
+    if (!session || !this.seedProtocol || this.seedProtocol.stage !== "commit") return;
+    const handId = String(payload.handId ?? "");
+    if (handId !== this.seedProtocol.handId) return;
+    const deck = this.deck as MultiPartySeedDeck;
+    try {
+      deck.submitCommitment(handId, session.playerId, String(payload.commitment ?? ""));
+    } catch {
+      this.sendTo(socket, makeMessage("ERROR", { code: "BAD_SEED_COMMIT", detail: "malformed commitment" }));
+      return;
+    }
+    if (deck.commitmentsComplete(handId)) {
+      await this.advanceSeedProtocol(handId, "commit", false);
+    }
+  }
+
+  private async onSeedReveal(socket: WebSocket, payload: Record<string, unknown>): Promise<void> {
+    const session = this.sessions.get(socket);
+    if (!session || !this.seedProtocol || this.seedProtocol.stage !== "reveal") return;
+    const handId = String(payload.handId ?? "");
+    if (handId !== this.seedProtocol.handId) return;
+    const deck = this.deck as MultiPartySeedDeck;
+    deck.submitReveal(handId, session.playerId, String(payload.seed ?? ""));
+    // Complete as soon as every committed participant has revealed.
+    if (this.seedRevealsComplete(handId)) {
+      await this.advanceSeedProtocol(handId, "reveal", false);
+    }
+  }
+
+  private seedRevealsComplete(handId: string): boolean {
+    const deck = this.deck as MultiPartySeedDeck;
+    const hand = deck["pending"].get(handId);
+    if (!hand) return false;
+    for (const p of hand.commitments.keys()) {
+      if (!hand.reveals.has(p)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Drive the seed protocol forward. `deadline` distinguishes the timer
+   * path (anti-abort policy applies) from the fast path (everyone done).
+   */
+  private async advanceSeedProtocol(handId: string, stage: "commit" | "reveal", deadline: boolean): Promise<void> {
+    if (!this.seedProtocol || this.seedProtocol.handId !== handId || this.seedProtocol.stage !== stage) return;
+    const deck = this.deck as MultiPartySeedDeck;
+
+    if (stage === "commit") {
+      if (deadline) deck.commitmentsFixed(handId);
+      else if (deck.commitmentsComplete(handId)) deck.commitmentsFixed(handId);
+      else return; // still waiting; timer will fire
+      this.clearSeedTimers();
+      this.seedProtocol.stage = "reveal";
+      const revealDeadline = Date.now() + this.config.seedTimeoutMs;
+      this.broadcast(makeMessage("SEED_REVEAL_REQUEST", { handId, deadlineUnixMs: revealDeadline }));
+      this.armSeedTimer(handId, "reveal");
+      return;
+    }
+
+    // Reveal stage finished (everyone revealed, or the deadline expired):
+    // the anti-abort policy applies either way.
+    this.clearSeedTimers();
+    this.seedProtocol = null;
+    const satOut = deck.nonRevealers(handId);
+    for (const p of satOut) {
+      const r = await this.runtime.commit({ type: "SIT_OUT", playerId: p });
+      if (!r.ok) continue;
+      const record = this.seats.get(p);
+      if (record) record.sittingOut = true;
+      this.seedSatOut.add(p);
+    }
+    if (satOut.length > 0) {
+      await this.events.append({
+        tableId: this.config.tableId,
+        handId,
+        sequence: null,
+        eventType: "SeedProtocolCompleted",
+        createdAt: new Date().toISOString(),
+        payload: { handId, satOut },
+        fiberRef: null,
+      });
+    }
+
+    // Need at least two dealt-in players after exclusions.
+    const stillEligible = [...this.seats.values()].filter((s) => s.connected && !s.sittingOut);
+    const withStacks = stillEligible.filter((s) => {
+      const st = this.runtime.state.seats.find((x) => x.playerId === s.playerId);
+      return st && st.stack > 0n;
+    });
+    if (withStacks.length < 2) {
+      // Everyone left was sat out (or stacks gone): restore and try later.
+      for (const p of satOut) {
+        const r = await this.runtime.commit({ type: "SIT_IN", playerId: p });
+        if (r.ok) {
+          const record = this.seats.get(p);
+          if (record) record.sittingOut = false;
+          this.seedSatOut.delete(p);
+        }
+      }
+      return;
+    }
+
+    // Derive FIRST: for the multiparty deck, deriveDeck materializes the
+    // deck (and the reveal) from the revealed seeds.
+    const cards = (this.deck as MultiPartySeedDeck).deriveDeck(handId);
+    const commitment = await this.deck.commitForHand(handId);
+    await this.beginHandWithDeck(handId, cards, commitment.commitment, withStacks.length);
+  }
+
+  /** Restore seed-sat-out players between hands. */
+  private async restoreSeedSatOut(): Promise<void> {
+    for (const p of [...this.seedSatOut]) {
+      const r = await this.runtime.commit({ type: "SIT_IN", playerId: p });
+      if (!r.ok) continue;
+      const record = this.seats.get(p);
+      if (record) record.sittingOut = false;
+      this.seedSatOut.delete(p);
+      this.broadcastState(r.result);
+    }
+  }
+
 
   private dealHoleCards(): void {
     for (const seat of this.runtime.state.seats) {
@@ -930,6 +1114,7 @@ export class TableServer {
     }
     if (phase === "HAND_COMPLETE" || phase === "WAITING") {
       await this.processMembershipQueues();
+      await this.restoreSeedSatOut();
       if (this.config.autoStartHands) {
         await this.maybeStartHand();
       }
@@ -1039,6 +1224,7 @@ export class TableServer {
       }
     }
     await this.processMembershipQueues();
+    await this.restoreSeedSatOut();
     if (this.config.autoStartHands) {
       await this.maybeStartHand();
     }

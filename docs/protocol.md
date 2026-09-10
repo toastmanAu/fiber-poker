@@ -119,6 +119,38 @@ signature, state }`.
 
 Reference implementation: `packages/protocol/src/canonical.ts`.
 
+## Multiparty seed protocol (P10, optional deck mode)
+
+With `FIBER_POKER_DECK=multiparty-seed`, the deck is derived from every
+participant's contribution instead of the server's CSPRNG:
+
+1. Before dealing, the table broadcasts `SEED_COMMITMENT_REQUEST {handId,
+   deadline}`. Each participant (and the table) picks a secret 32-byte seed
+   and sends `SEED_COMMIT {handId, commitment}` where
+   `commitment = H("FIBER_POKER/SEED/V1" || handId || playerId || seed)`.
+2. Commitments are fixed at the deadline (first per participant wins; later
+   submissions are ignored). The table broadcasts `SEED_REVEAL_REQUEST`.
+3. Participants send `SEED_REVEAL {handId, seed}`; the table verifies the
+   commitment.
+4. The combined deck seed is
+   `H("FIBER_POKER/DECK_SEED/V1" || handId || count || sorted(playerId ||
+   seed))` — sorted by player id so every party derives the same value.
+   The permutation is a deterministic Fisher-Yates from that seed (blake2b
+   counter stream with rejection sampling) and is committed/broadcast with
+   the same DeckCommitted/DECK_REVEALED flow as V0 (nonce = combined seed).
+
+Anti-abort policy (docs/08): a participant that fails to reveal by the
+deadline is **sat out** for the hand (committed `SIT_OUT`/`SIT_IN` around
+it) and its seed is excluded. Withholding a reveal yields no information
+advantage — commitments are hiding and the deck is derived only after the
+reveal deadline — it can only delay, and serial aborters never get dealt
+in. Bond/forfeit enforcement is a deployment policy layered on top.
+
+**Fairness property**: with at least one honest contributor (and client
+audits of the derivation), no single party — including the dealer — can
+choose a favorable deck. The server still sees all cards once the deck is
+derived; dealing privacy remains the mental-poker track (P11).
+
 ## Deck fairness (V0)
 
 Before dealing, the table broadcasts

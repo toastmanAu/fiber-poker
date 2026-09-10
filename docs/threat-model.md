@@ -68,7 +68,11 @@ default exit.
 ## Residual risks accepted in V0
 
 1. The coordinator is a single point of trust and availability.
-2. Deck fairness is commit-then-reveal, not dealing-fairness.
+2. Deck fairness is commit-then-reveal, not dealing-fairness. With the
+   optional multiparty seed mode (P10, `FIBER_POKER_DECK=multiparty-seed`)
+   the deck derives from every participant's committed seed, so no single
+   party — including the dealer — can choose a favorable deck while at
+   least one contributor is honest; the server still sees all cards.
 3. Star-topology liquidity fragmentation is mitigated by oversized
    table-side funding on devnet; the LiquidityManager pauses hands when
    payout capacity is insufficient, but rebalancing is not automated.
