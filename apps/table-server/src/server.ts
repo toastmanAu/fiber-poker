@@ -31,7 +31,7 @@ import {
   verifyEnvelopeSignature,
   type SeatStatus,
 } from "@fiber-poker/protocol";
-import { FakeSettlementAdapter, type SettlementAdapter } from "@fiber-poker/settlement";
+import { FakeSettlementAdapter, ImmediateFiberSettlement, type SettlementAdapter } from "@fiber-poker/settlement";
 import type { FiberGateway } from "@fiber-poker/fiber-adapter";
 import { ChannelManager, type SeatLifecycle } from "./channels.ts";
 import { SettlementCoordinator } from "./coordinator.ts";
@@ -103,7 +103,8 @@ export class TableServer {
   private acks = new Map<string, { sequence: string; stateHash: string; at: string }>();
   /** Poker session pubkey -> Fiber node pubkey (docs/15). */
   private peerMap = new Map<string, string>();
-  private resolvePeer: (playerId: string) => string = (id) => id;
+  /** Reads the LIVE map so late-registered declarations apply everywhere. */
+  private resolvePeer = (playerId: string): string => this.peerMap.get(playerId) ?? playerId;
   /** P10 multiparty seed protocol state (null when idle / server deck). */
   private seedProtocol: { handId: string; stage: "commit" | "reveal" } | null = null;
   /** Players sat out by the seed anti-abort policy this hand. */
@@ -133,6 +134,7 @@ export class TableServer {
     this.notify = (playerId, raw: unknown) => {
       const body = raw as { type?: string; payload?: unknown };
       const msg = makeMessage(String(body.type ?? "ERROR"), body.payload ?? {}) as unknown as Record<string, unknown>;
+
       this.notificationLog.push({ playerId, message: msg });
       if (this.notificationLog.length > 5000) this.notificationLog.shift();
       const session = this.sessions.getByPlayer(playerId);
@@ -143,8 +145,9 @@ export class TableServer {
 
     // docs/15 topology: a player's fiber node key differs from their poker
     // session key. The peer map bridges them; identity by default.
-    this.peerMap = new Map(Object.entries(JSON.parse(this.config.peerMapJson ?? "{}") as Record<string, string>));
-    this.resolvePeer = (playerId: string) => this.peerMap.get(playerId) ?? playerId;
+    for (const [k, v] of Object.entries(JSON.parse(this.config.peerMapJson ?? "{}") as Record<string, string>)) {
+      this.peerMap.set(k, v);
+    }
     this.channels = new ChannelManager(this.gateway, this.config.channelFunding, this.notify, this.resolvePeer);
     this.liquidity = new LiquidityManager(this.gateway, this.resolvePeer);
     this.coordinator = new SettlementCoordinator(this.adapter, this.events, this.notify, {
@@ -152,8 +155,11 @@ export class TableServer {
       holdMode: this.adapter.constructor.name === "HoldInvoiceSettlement",
       awaitTimeoutMs: this.config.settlementTimeoutMs,
     });
-    // Adapter-level peer resolution (e.g. ImmediateFiberSettlement payouts)
-    // is injected by the test/entrypoint via adapter constructor options.
+    // Adapter-level peer resolution (ImmediateFiberSettlement payouts):
+    // bind to the live map so declared peers apply to payouts too.
+    if (this.adapter instanceof ImmediateFiberSettlement) {
+      this.adapter.resolvePeer = (playerId: string) => this.peerMap.get(playerId) ?? playerId;
+    }
     this.coordinator.setTableId(this.config.tableId);
     if (this.adapter instanceof FakeSettlementAdapter) {
       this.adapter.autoPayPlayerPayments = this.config.autoPay;
@@ -269,7 +275,8 @@ export class TableServer {
     const closingPeers = new Set(channels.filter((c) => c.stateName !== "ChannelReady" && c.stateName !== "Closed").map((c) => c.peerPubkey));
     for (const record of this.seats.values()) {
       if (this.blockedSeats.has(record.playerId)) continue;
-      if (!readyPeers.has(record.playerId) && !closingPeers.has(record.playerId)) {
+      const peer = this.resolvePeer(record.playerId);
+      if (!readyPeers.has(peer) && !closingPeers.has(peer)) {
         // The player's channel vanished without a cooperative leave flow:
         // treat as force-closed until an operator resolves it.
         this.blockedSeats.add(record.playerId);
@@ -555,6 +562,21 @@ export class TableServer {
       return;
     }
     const requestedSeat = payload.seat !== undefined ? Number(payload.seat) : undefined;
+
+    // docs/15: the player's fiber node key differs from their poker session
+    // key. A declaring player supplies its fiber node pubkey; the table
+    // routes channel ops and payouts to it. Trust note (V0): a false
+    // declaration can only misdirect the DECLARER'S own payouts — there is
+    // no path where it takes funds from other players. Static
+    // FIBER_POKER_PEER_MAP entries take precedence over declarations.
+    const declaredPeer = typeof payload.fiberPeerPubkey === "string" ? payload.fiberPeerPubkey : undefined;
+    if (declaredPeer) {
+      if (!/^(02|03)[0-9a-f]{64}$/.test(declaredPeer)) {
+        this.sendTo(socket, makeMessage("ERROR", { code: "BAD_FIBER_PEER", detail: "fiberPeerPubkey must be 33-byte compressed hex" }));
+        return;
+      }
+      if (!this.peerMap.has(playerId)) this.peerMap.set(playerId, declaredPeer);
+    }
 
     // 1. Channel negotiation (private bidirectional channel per seat).
     this.channels.setLifecycle(playerId, "CONNECTED");

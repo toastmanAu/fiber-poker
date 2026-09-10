@@ -49,8 +49,9 @@ export class ImmediateFiberSettlement implements SettlementAdapter {
   private paymentHandlers = new Set<(req: PaymentRequest) => void>();
   private pollMs: number;
   private timeoutMs: number;
-  /** Poker session key -> Fiber node pubkey (docs/15). Identity by default. */
-  private resolvePeer: (playerId: string) => string;
+  /** Poker session key -> Fiber node pubkey (docs/15). Identity by default.
+   *  Mutable: the table server binds this to its live peer registry. */
+  resolvePeer: (playerId: string) => string;
 
   constructor(
     private readonly gateway: FiberGateway,

@@ -68,6 +68,8 @@ export class SettlementCoordinator {
         reason: req.obligation.reason,
         obligationId: req.obligation.obligationId,
         invoice: req.invoice,
+        // rc7 payer flow: the invoice ADDRESS is what send_payment needs.
+        invoiceAddress: req.invoiceAddress,
         direction: req.obligation.direction,
       },
     });

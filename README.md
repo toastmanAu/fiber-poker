@@ -94,6 +94,26 @@ A failed payment NEVER commits the poker transition. See
 tests in `tests/chaos/` kill the server at every durable boundary and
 verify exactly-once settlement.
 
+## Player agent (docs/15)
+
+A headless player with its own Fiber credentials — the bridge between the
+browser UI and real money:
+
+```bash
+FIBER_POKER_TABLE_URL=ws://127.0.0.1:8080 \
+FIBER_POKER_AGENT_NAME=alice \
+FIBER_POKER_FNN_URL=http://<player-node>:8231 \
+FIBER_POKER_FNN_TOKEN=<player biscuit> \
+FIBER_POKER_BUY_IN_CKB=10 \
+npm run agent -w @fiber-poker/player-agent
+```
+
+The agent authenticates with its persisted session key, DECLARES its Fiber
+node pubkey on `JOIN_TABLE` (docs/15: session key ≠ node key; a false
+declaration can only misdirect the declarer's own payouts), auto-pays every
+`PAYMENT_REQUIRED` invoice from its node, plays a simple policy
+(`--policy call-station|tight`), and leaves cleanly on SIGINT.
+
 ## Live Fiber node testing (gated)
 
 With a testnet FNN node reachable, the read-only live suite validates the
@@ -106,15 +126,23 @@ FIBER_POKER_FNN_TOKEN=<base64 biscuit token> \
 npx vitest run tests/fiber/live-node.test.ts
 ```
 
-And the **full 2-player hand with real settlements** (table node + player
-node, both Biscuit-authed; two poker seats peer-mapped onto the player node
-per docs/15):
+And the **full 2-agent hand with real settlements** (table node + player
+node; two headless agents declare the player node and self-pay):
 
 ```bash
 FIBER_POKER_FNN_URL=http://<table>:8227 FIBER_POKER_FNN_TOKEN=<table biscuit> \
 FIBER_POKER_PLAYER_FNN_URL=http://<player>:8231 FIBER_POKER_PLAYER_FNN_TOKEN=<player biscuit> \
-npx vitest run tests/fiber/live-hand.test.ts
+npx vitest run tests/fiber/live-agent-hand.test.ts
 ```
+
+VERIFIED LIVE 2026-09-10/11 against `fnn 0.9.0-rc7`: five real invoice
+payments (buy-ins, blinds, bets) settled payment-before-commit by two
+self-driving agents, plus the payout leg. Channel-opening rules learned the
+hard way: always pass `funding_fee_rate: 20000` (fnn's default 1000
+underpays cycle-heavy funding txs and they die after broadcast), never open
+under 100 CKB (peers' auto-accept floor silently pins sub-floor opens
+forever), and a poker player's fiber node key differs from their poker
+session key (`FIBER_POKER_PEER_MAP` / declared peers).
 
 VERIFIED LIVE 2026-09-10/11 against `fnn 0.9.0-rc7`: five real invoice
 payments (buy-ins, blinds, bets) settled payment-before-commit, and the

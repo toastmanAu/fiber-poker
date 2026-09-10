@@ -19,7 +19,8 @@
     "test:server": "vitest run tests/integration tests/chaos",
     "demo:two": "tsx tests/integration/demos/two-player-demo.ts",
     "demo:six": "tsx tests/integration/demos/six-player-demo.ts",
-    "server": "tsx apps/table-server/src/main.ts"
+    "server": "tsx apps/table-server/src/main.ts",
+    "agent": "npm run agent -w @fiber-poker/player-agent"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
