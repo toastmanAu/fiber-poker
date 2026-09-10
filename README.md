@@ -94,6 +94,23 @@ A failed payment NEVER commits the poker transition. See
 tests in `tests/chaos/` kill the server at every durable boundary and
 verify exactly-once settlement.
 
+## Live Fiber node testing (gated)
+
+With a testnet FNN node reachable, the read-only live suite validates the
+adapter surface against reality (shapes, enums, auth, invoice lifecycle —
+no funds moved):
+
+```bash
+FIBER_POKER_FNN_URL=http://<node>:8227 \
+FIBER_POKER_FNN_TOKEN=<base64 biscuit token> \
+npx vitest run tests/fiber/live-node.test.ts
+```
+
+Without the env vars the suite skips. Channel open/close and payment tests
+move testnet funds and require `FIBER_POKER_LIVE_CHANNELS=1` plus
+`FIBER_POKER_LIVE_PEER` (peer multiaddr). RPC auth uses FNN Biscuit tokens
+(`Authorization: Bearer <base64>`) — server-side only, never in browsers.
+
 ## Documentation
 
 - `docs/protocol.md` — wire format, canonical encoding, hash chain, auth

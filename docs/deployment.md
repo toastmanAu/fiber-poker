@@ -59,6 +59,16 @@ FIBER_POKER_DATA_DIR=.data/table \
 npm run server
 ```
 
+Before wiring money paths, run the gated live suite against the node —
+it validates auth, response shapes, channel-state enums, and the invoice
+lifecycle without moving funds:
+
+```bash
+FIBER_POKER_FNN_URL=http://127.0.0.1:8227 \
+FIBER_POKER_FNN_TOKEN=<biscuit token> \
+npx vitest run tests/fiber/live-node.test.ts
+```
+
 The `ImmediateFiberSettlement` adapter then:
 
 - creates invoices bound to deterministic obligation hashes
