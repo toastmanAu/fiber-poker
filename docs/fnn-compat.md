@@ -533,3 +533,31 @@ the desk-checked shapes above; everything else matched.**
 - Auto-accept is on: minimum inbound funding 5 CKB, and the node itself
   auto-funds 99 CKB when accepting — factor into liquidity planning.
 - Peer seen: `/ip4/192.168.68.102/…` (driveThree), 2 channels, 1 peer.
+
+### Live channel-open findings (2026-09-10, later the same day)
+
+1. **`open_channel` requires BOTH `peer_id` AND `pubkey`** (same value,
+   unprefixed pubkey hex). Omitting `pubkey` → `-32602: missing field
+   'pubkey'`. Not in the desk-checked reference.
+2. **Auto-accept minimum enforced server-side with exact text**:
+   `"The funding amount (600000000) should be greater than or equal to
+   9900000000"` — driveThree's auto-accept minimum is 99 CKB. Amounts
+   below it are rejected synchronously.
+3. **An open whose funding the opener cannot cover aborts as
+   `Closed/FUNDING_ABORTED`** (observed with a 100,000 CKB open — hex slip;
+   `0x2386f26fc10000` is 1e13 shannons). Aborted opens leave a
+   `local_balance`-showing corpse in `list_channels {only_pending:true}`.
+4. **NegotiatingFunding can stall indefinitely when the ACCEPTOR's wallet
+   cannot cover its auto-accept contribution**: both inits exchange
+   (`OUR_INIT_SENT|INIT_SENT`) and then nothing happens — observed for 5+
+   minutes. Treat "NegotiatingFunding older than ~1 min" as a wallet-funding
+   problem on the accepting node, not a transport issue.
+5. Aborted opens also leave accumulating `NegotiatingFunding` ghosts
+   (empty state_flags, local 0); each open attempt adds one. No cleanup RPC
+   observed on rc7.
+
+### Channel-phase test status
+
+- Channel open: attempted; stalled at acceptor wallet (see #4). To finish
+  the 2-player funded-hand test, the accepting node (driveThree) needs
+  on-chain funds, or a manual `accept_channel` via its own Biscuit token.
