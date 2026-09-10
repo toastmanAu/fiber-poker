@@ -147,3 +147,10 @@ Devnet/testnet only. Real-money poker triggers gambling regulation
 to Australian customers as a prohibited interactive gambling service).
 Obtain jurisdiction-specific legal advice before any real-value deployment
 and keep those gates outside the protocol.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Note the release gate above: this project
+targets devnet/testnet and non-redeemable play value only; licensing does not
+address real-money gambling regulation, which remains gated per
+[docs/11-legal-release-gates in the project handoff](https://github.com/toastmanAu/fiber-poker#release-gate).
