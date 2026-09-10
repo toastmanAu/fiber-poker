@@ -136,8 +136,9 @@ function unbiasedBelow(randomBytes: (n: number) => Uint8Array, bound: number): n
 }
 
 /**
- * V2 placeholder: mental poker (Barnett–Smart style encrypted shuffles).
- * Must stay entirely outside the core Hold'em rules and settlement layers.
+ * V2 placeholder adapter: mental poker wired into the DeckService interface.
+ * The protocol mechanics live in ./mental-poker.ts (research prototype);
+ * this adapter exists so a future integration has the right seam.
  */
 export class MentalPokerDeck implements DeckService {
   readonly kind = "mental-poker-v2";
@@ -155,3 +156,4 @@ export class MentalPokerDeck implements DeckService {
 }
 
 export * from "./multiparty.ts";
+export * from "./mental-poker.ts";

@@ -3,3 +3,4 @@ export * from "./immediate-fiber.ts";
 export * from "./fake.ts";
 export * from "./experimental.ts";
 export * from "./hold.ts";
+export * from "./poker-channel.ts";

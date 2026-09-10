@@ -100,6 +100,8 @@ verify exactly-once settlement.
 - `docs/threat-model.md` — what the table can and cannot do to you
 - `docs/fnn-compat.md` — verified FNN v0.9.0 RPC compatibility note
 - `docs/deployment.md` — devnet deployment guide (CKB devnet + FNN + watchtower)
+- `docs/mental-poker-research.md` — P11 research prototype + path to production
+- `docs/poker-channel-research.md` — P12 generalized CKB poker channel research
 - `../fiber-poker-agent-handoff/` — the original specification handoff
 
 ## Release gate

@@ -18,6 +18,11 @@ import type { Obligation, PaymentRequest, SettlementAdapter, SettlementRef, Sett
 /**
  * Placeholder for the long-term generalized CKB poker state channel
  * (docs/14). Never callable in V0: any attempt throws loudly.
+ *
+ * The protocol mechanics (co-signed allocation states, epochs, disputes)
+ * are demonstrated by PokerChannelSim (./poker-channel.ts) — a research
+ * simulator with no CKB scripts attached. Bridging that state machine to
+ * real cells/adjudication is the P12 engineering milestone.
  */
 export class FutureStateChannelSettlement implements SettlementAdapter {
   readonly name = "future-state-channel";
