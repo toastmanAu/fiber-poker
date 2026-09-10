@@ -534,6 +534,34 @@ the desk-checked shapes above; everything else matched.**
   auto-funds 99 CKB when accepting — factor into liquidity planning.
 - Peer seen: `/ip4/192.168.68.102/…` (driveThree), 2 channels, 1 peer.
 
+### Invoice semantics — CRITICAL rc7 finding (live-verified)
+
+**A `new_invoice` created with only `payment_hash` can never be settled.**
+The payee does not know the preimage; the payment locks at invoice status
+`Received` (payer: `Inflight`) and stays there until the payee cancels it.
+Verified live: a hash-only 1 CKB invoice sat at `Received`; after
+`cancel_invoice`, the payer's payment flipped to `Failed` with
+`failed_error: "InvoiceCancelled"` and the TLC refunded — the cancel/refund
+path works perfectly on rc7.
+
+The correct payee-side flows (both verified live):
+
+1. **Auto-settling (immediate)**: `new_invoice { amount, currency,
+   payment_preimage }` — preimage ONLY (sending hash+preimage together →
+   `-32000: Both payment_hash and payment_preimage are set`). The payee
+   knows the preimage, so fnn auto-settles on TLC arrival: payer `Success`,
+   payee invoice `Paid`, channel balances move. VERIFIED LIVE: 1 CKB moved
+   table-ward over the real channel.
+2. **Hold**: same preimage-only creation; the payee simply delays
+   `settle_invoice` to hold funds. (The explicit settle_invoice call was
+   not needed live — fnn auto-settled; the settle_invoice params shape on
+   rc7 remains unverified and errored with a vector-conversion message.)
+
+Consequence for this codebase: `ImmediateFiberSettlement` now creates
+preimage-based invoices (rc7 flow) — the correlation hash of the original
+design is unimplementable; correlation travels via obligationId in the
+event log. Simulators updated to match.
+
 ### Live channel-open findings (2026-09-10, later the same day)
 
 1. **`open_channel` requires BOTH `peer_id` AND `pubkey`** (same value,

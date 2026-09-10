@@ -81,10 +81,11 @@ export class ImmediateFiberSettlement implements SettlementAdapter {
       // poker transcript travels via obligationId in the event log (the
       // old deterministic payment-hash derivation is unimplementable on
       // rc7 — a hash-only invoice can never be settled).
-      await this.gateway.createInvoice(BigInt(obligation.amountShannons));
+      const inv = await this.gateway.createInvoice(BigInt(obligation.amountShannons));
+      entry.paymentHash = inv.paymentHash;
       entry.status = "INFLIGHT";
       for (const handler of this.paymentHandlers) {
-        handler({ ref, obligation, paymentHash });
+        handler({ ref, obligation, paymentHash: inv.paymentHash });
       }
       this.pollInBackground(entry).catch(() => {
         entry.status = "FAILED";

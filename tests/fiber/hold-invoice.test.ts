@@ -43,11 +43,9 @@ describe("hold invoice semantics (simulated)", () => {
     await payer.openChannel(table, 100n * K);
 
     const preimage = "preimage-secret-01";
-    const preimageHash = Buffer.from( // eslint-disable-line no-undef
-      (await import("@noble/hashes/blake2b")).blake2b(new TextEncoder().encode(preimage), { dkLen: 32, personalization: "ckb-default-hash" }),
-    ).toString("hex");
-    const { paymentHash } = await net.node(table).createHoldInvoice!(10n * K, preimageHash);
-    expect(paymentHash).toBe(preimageHash);
+    // Sim semantics: the preimage string doubles as the invoice hash key.
+    const { paymentHash } = await net.node(table).createHoldInvoice!(10n * K, preimage);
+    expect(paymentHash).toBe(preimage);
 
     // Pay: funds lock, invoice Received, payer payment Inflight.
     net.payInvoice(player, paymentHash);
@@ -63,7 +61,7 @@ describe("hold invoice semantics (simulated)", () => {
     expect(await payer.paymentStatus(paymentHash)).toBe("Success");
 
     // Cancel path on a fresh hold: funds effectively return (payer Failed).
-    const { paymentHash: h2 } = await net.node(table).createHoldInvoice!(5n * K, preimageHash);
+    const { paymentHash: h2 } = await net.node(table).createHoldInvoice!(5n * K, preimage);
     net.payInvoice(player, h2);
     net.cancelInvoice(h2);
     expect(await net.node(table).invoiceStatus(h2)).toBe("Cancelled");

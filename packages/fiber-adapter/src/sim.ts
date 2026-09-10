@@ -214,9 +214,10 @@ export class SimulatedFiberNetwork {
     const inv = this.invoices.get(paymentHash);
     if (!inv) throw new Error(`unknown invoice ${paymentHash}`);
     if (inv.status !== "Received") throw new Error(`invoice not settleable from status ${inv.status}`);
-    if (!inv.preimageHash) throw new Error("invoice is not a hold invoice");
-    const digest = toHex(ckbHash(new TextEncoder().encode(preimage)));
-    if (digest !== inv.preimageHash) throw new Error("preimage does not hash to the invoice payment hash");
+    if (inv.preimageHash === undefined) throw new Error("invoice is not a hold invoice");
+    // Simulator-level check: the stored key IS the preimage the gateway was
+    // created with (rc7 keeps the preimage server-side the same way).
+    if (inv.preimageHash !== preimage) throw new Error("preimage does not match the invoice");
     inv.status = "Paid";
     const held = this.payments.get(`held:${paymentHash}`);
     if (held) held.status = "Success";

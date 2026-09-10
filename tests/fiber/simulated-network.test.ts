@@ -108,8 +108,8 @@ describe("ImmediateFiberSettlement over the simulator", () => {
 
     const ob = obligation("t1", player, "PLAYER_TO_TABLE", 5n * CKB);
     const ref = await adapter.reserveOrPay(ob);
-    // Manually pay the invoice from the player node.
-    net.payInvoice(player, (await import("@fiber-poker/settlement")).paymentHashFor(ob));
+    // Manually pay the invoice from the player node (hash from the request).
+    net.payInvoice(player, requests[0]!.paymentHash);
     const status = await adapter.awaitTerminal(ref, 5000);
     expect(status).toBe("SUCCEEDED");
     expect(requests).toHaveLength(1);
