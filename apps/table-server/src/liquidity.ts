@@ -26,27 +26,42 @@ export class LiquidityManager {
   private paused = false;
   private pausedReason = "";
 
-  constructor(private readonly gateway: FiberGateway | null) {}
+  constructor(
+    private readonly gateway: FiberGateway | null,
+    /** Poker session key -> Fiber node pubkey (docs/15). Identity default. */
+    private readonly resolvePeer: (playerId: string) => string = (id) => id,
+  ) {}
 
-  /** Refresh per-channel balances from the gateway. */
+  /**
+   * Refresh per-peer liquidity (keyed by PLAYER id). Multiple channels to
+   * the same peer are AGGREGATED: payouts route through any of them, so a
+   * split (e.g. 1 CKB + 385 CKB) must be summed, not last-channel-wins.
+   */
   async refresh(players: { playerId: string }[]): Promise<void> {
     if (!this.gateway) return;
     const channels = await this.gateway.listChannels();
-    const byPeer = new Map<string, GatewayChannel>();
+    const byPeer = new Map<string, GatewayChannel[]>();
     for (const c of channels) {
-      if (c.stateName === "ChannelReady") byPeer.set(c.peerPubkey, c);
+      if (c.stateName !== "ChannelReady") continue;
+      const list = byPeer.get(c.peerPubkey) ?? [];
+      list.push(c);
+      byPeer.set(c.peerPubkey, list);
     }
     for (const p of players) {
-      const c = byPeer.get(p.playerId);
-      const entry: PlayerLiquidity = {
+      const peer = this.resolvePeer(p.playerId);
+      const chans = byPeer.get(peer) ?? [];
+      const local = chans.reduce((a, c) => a + c.localBalance, 0n);
+      const remote = chans.reduce((a, c) => a + c.remoteBalance, 0n);
+      const offered = chans.reduce((a, c) => a + c.offeredTlcBalance, 0n);
+      const existing = this.liquidity.get(p.playerId);
+      this.liquidity.set(p.playerId, {
         playerId: p.playerId,
-        channelId: c?.channelId ?? this.liquidity.get(p.playerId)?.channelId ?? null,
-        localBalance: c?.localBalance ?? 0n,
-        remoteBalance: c?.remoteBalance ?? 0n,
-        pendingOutgoing: c?.offeredTlcBalance ?? 0n,
-        usableOutbound: (c?.localBalance ?? 0n) - (c?.offeredTlcBalance ?? 0n),
-      };
-      this.liquidity.set(p.playerId, entry);
+        channelId: chans[0]?.channelId ?? existing?.channelId ?? null,
+        localBalance: local,
+        remoteBalance: remote,
+        pendingOutgoing: offered,
+        usableOutbound: local - offered,
+      });
     }
   }
 

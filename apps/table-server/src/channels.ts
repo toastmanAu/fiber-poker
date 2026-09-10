@@ -31,6 +31,8 @@ export class ChannelManager {
     private readonly gateway: FiberGateway | null,
     private readonly fundingAmount: bigint,
     private readonly notify: (playerId: string, message: unknown) => void,
+    /** Poker session key -> Fiber node pubkey (docs/15). Identity default. */
+    private readonly resolvePeer: (playerId: string) => string = (id) => id,
   ) {}
 
   status(playerId: string): SeatLifecycle {
@@ -62,12 +64,13 @@ export class ChannelManager {
       this.setLifecycle(playerPubkey, "CHANNEL_READY");
       return id;
     }
-    const existing = await this.gateway.channelTo?.(playerPubkey);
+    const peer = this.resolvePeer(playerPubkey);
+    const existing = await this.gateway.channelTo?.(peer);
     let channelId: string;
     if (existing) {
       channelId = existing.channelId;
     } else {
-      const opened = await this.gateway.openChannel(playerPubkey, this.fundingAmount);
+      const opened = await this.gateway.openChannel(peer, this.fundingAmount);
       channelId = opened.channelId;
     }
     this.channels.set(playerPubkey, channelId);

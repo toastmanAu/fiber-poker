@@ -537,19 +537,21 @@ export class SimNodeGateway implements FiberGateway {
     this.net.shutdownChannel(ch.channelId, { force: true, claimedVersion, closer: this.pubkey });
   }
 
-  async createInvoice(amount: bigint, paymentHash?: string): Promise<{ paymentHash: string }> {
-    return this.net.createInvoice(this.pubkey, amount, paymentHash);
+  async createInvoice(amount: bigint, paymentHash?: string): Promise<{ paymentHash: string; invoiceAddress: string }> {
+    const r = this.net.createInvoice(this.pubkey, amount, paymentHash);
+    return { paymentHash: r.paymentHash, invoiceAddress: `sim-invoice-${r.paymentHash.slice(0, 12)}` };
   }
 
   async invoiceStatus(paymentHash: string): Promise<"Open" | "Received" | "Paid" | "Cancelled" | "Expired" | "Unknown"> {
     return this.net.invoiceStatus(paymentHash).status;
   }
 
-  async createHoldInvoice(amount: bigint, preimage: string): Promise<{ paymentHash: string }> {
+  async createHoldInvoice(amount: bigint, preimage: string): Promise<{ paymentHash: string; invoiceAddress: string }> {
     // Sim semantics: the "preimage" argument is used as the hash key. The
     // sim settles only via explicit settleInvoice (no auto-settle), unlike
     // rc7 which auto-settles when the payee knows the preimage.
-    return this.net.createInvoice(this.pubkey, amount, preimage, { hold: true, preimageHash: preimage });
+    const r = this.net.createInvoice(this.pubkey, amount, preimage, { hold: true, preimageHash: preimage });
+    return { paymentHash: r.paymentHash, invoiceAddress: `sim-hold-${r.paymentHash.slice(0, 12)}` };
   }
 
   async settleInvoice(paymentHash: string, preimage: string): Promise<void> {
@@ -565,6 +567,11 @@ export class SimNodeGateway implements FiberGateway {
     const hash = paymentHash ?? toHex(ckbHash(new TextEncoder().encode(`pay-${this.pubkey}-${targetPubkey}-${amount}-${Math.random()}`)));
     this.net.sendDirect(this.pubkey, targetPubkey, amount, hash);
     return { paymentHash: hash };
+  }
+
+  async payInvoice(invoice: string): Promise<{ paymentHash: string }> {
+    this.net.payInvoice(this.pubkey, invoice);
+    return { paymentHash: invoice };
   }
 
   async paymentStatus(paymentHash: string): Promise<SimPaymentStatus | "Unknown"> {

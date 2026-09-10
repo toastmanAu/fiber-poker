@@ -19,6 +19,9 @@ export interface GatewayChannel {
   isOneWay: boolean;
 }
 
+export const FNN_DEFAULT_FUNDING_FEE_RATE = 20_000n; // live-verified floor: fnn's 1000 underpays
+export const FNN_MIN_VIABLE_CHANNEL_FUNDING = 100n * 100_000_000n; // 100 CKB
+
 export interface FiberGateway {
   nodePubkey(): Promise<string>;
   connectPeer(address: string): Promise<void>;
@@ -27,9 +30,9 @@ export interface FiberGateway {
   /** Convenience for topology checks. */
   channelTo?(peerPubkey: string): Promise<GatewayChannel | undefined>;
   shutdownChannel(channelId: string, opts?: { force?: boolean }): Promise<void>;
-  /** Payee-side: create an invoice the player can pay, bound to a specific
-   *  payment hash when given (correlation with the poker transcript). */
-  createInvoice(amount: bigint, paymentHash?: string): Promise<{ paymentHash: string }>;
+  /** Payee-side: create an invoice the player can pay (rc7: payee-preimage
+   *  form; the invoice address is what the payer needs for send_payment). */
+  createInvoice(amount: bigint, paymentHash?: string): Promise<{ paymentHash: string; invoiceAddress?: string }>;
   invoiceStatus(paymentHash: string): Promise<"Open" | "Received" | "Paid" | "Cancelled" | "Expired" | "Unknown">;
   /** Hold invoice: created from the payee's preimage; payer funds lock at
    *  "Received" until settled. The response hash is authoritative (it is
@@ -41,5 +44,7 @@ export interface FiberGateway {
   cancelInvoice?(paymentHash: string): Promise<void>;
   /** Payer-side: keysend-style direct payment to a peer's pubkey. */
   sendToPeer(targetPubkey: string, amount: bigint, paymentHash?: string): Promise<{ paymentHash: string }>;
+  /** Payer-side: pay an invoice address (player agent flow). */
+  payInvoice?(invoice: string): Promise<{ paymentHash: string }>;
   paymentStatus(paymentHash: string): Promise<"Created" | "Inflight" | "Success" | "Failed" | "Unknown">;
 }

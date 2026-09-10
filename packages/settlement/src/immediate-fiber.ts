@@ -49,13 +49,21 @@ export class ImmediateFiberSettlement implements SettlementAdapter {
   private paymentHandlers = new Set<(req: PaymentRequest) => void>();
   private pollMs: number;
   private timeoutMs: number;
+  /** Poker session key -> Fiber node pubkey (docs/15). Identity by default. */
+  private resolvePeer: (playerId: string) => string;
 
   constructor(
     private readonly gateway: FiberGateway,
-    opts?: { pollMs?: number; timeoutMs?: number },
+    opts?: {
+      pollMs?: number;
+      timeoutMs?: number;
+      /** Poker session key -> Fiber node pubkey (docs/15). */
+      resolvePeer?: (playerId: string) => string;
+    },
   ) {
     this.pollMs = opts?.pollMs ?? 300;
     this.timeoutMs = opts?.timeoutMs ?? 60_000;
+    this.resolvePeer = opts?.resolvePeer ?? ((id: string) => id);
   }
 
   onPaymentRequest(handler: (req: PaymentRequest) => void): void {
@@ -85,15 +93,15 @@ export class ImmediateFiberSettlement implements SettlementAdapter {
       entry.paymentHash = inv.paymentHash;
       entry.status = "INFLIGHT";
       for (const handler of this.paymentHandlers) {
-        handler({ ref, obligation, paymentHash: inv.paymentHash });
+        handler({ ref, obligation, paymentHash: inv.paymentHash, invoiceAddress: inv.invoiceAddress });
       }
       this.pollInBackground(entry).catch(() => {
         entry.status = "FAILED";
         entry.error = "poll error";
       });
     } else {
-      // Payout / refund: table pays the player directly.
-      await this.gateway.sendToPeer(obligation.playerId, BigInt(obligation.amountShannons), paymentHash);
+      // Payout / refund: table pays the player's FIBER peer directly.
+      await this.gateway.sendToPeer(this.resolvePeer(obligation.playerId), BigInt(obligation.amountShannons), paymentHash);
       this.pollInBackground(entry).catch(() => {
         entry.status = "FAILED";
         entry.error = "poll error";

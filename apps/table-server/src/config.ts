@@ -32,6 +32,12 @@ export interface TableServerConfig {
   deck: "server-commit-reveal" | "multiparty-seed";
   /** Per-phase deadline for the multiparty seed protocol. */
   seedTimeoutMs: number;
+  /**
+   * Poker session pubkey -> Fiber node pubkey (docs/15: a player's fiber
+   * node key differs from their poker session key). JSON object; identity
+   * mapping for keys not present.
+   */
+  peerMapJson?: string;
 }
 
 function env(name: string): string | undefined {
@@ -72,6 +78,7 @@ export function loadConfig(overrides: Partial<TableServerConfig> = {}): TableSer
     settlementTimeoutMs: envInt("FIBER_POKER_SETTLEMENT_TIMEOUT_MS", 120_000),
     deck: (env("FIBER_POKER_DECK") as "server-commit-reveal" | "multiparty-seed") ?? "server-commit-reveal",
     seedTimeoutMs: envInt("FIBER_POKER_SEED_TIMEOUT_MS", 2000),
+    peerMapJson: env("FIBER_POKER_PEER_MAP"),
     ...overrides,
   };
   return cfg;

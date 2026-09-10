@@ -29,6 +29,9 @@ export interface RealFiberGatewayOptions {
     public?: boolean;
     oneWay?: boolean;
     fundingAmount: bigint;
+    /** Live-verified: fnn's default 1000 underpays cycle-heavy funding txs
+     *  and they get rejected after broadcast, destroying the channel. */
+    fundingFeeRate?: bigint;
   };
 }
 
@@ -72,9 +75,17 @@ export class RealFiberGateway implements FiberGateway {
 
   async openChannel(peerPubkey: string, fundingAmount: bigint): Promise<{ channelId: string }> {
     const defaults = this.opts.channelDefaults ?? { public: false, oneWay: false };
+    // Handoff-verified floor: under 99 CKB (initiator reserve) the channel is
+    // useless regardless of peer config; under the peer's 100 CKB auto-accept
+    // floor it is pinned in NegotiatingFunding forever with no rejection.
+    if (fundingAmount < 100n * 100_000_000n) {
+      throw new Error("funding below 100 CKB: no spendable balance and peers auto-accept floor blocks it");
+    }
     const { temporary_channel_id } = await this.rpc.openChannel({
       peer_id: peerPubkey,
+      pubkey: peerPubkey, // rc7 requires both fields
       funding_amount: fundingAmount,
+      funding_fee_rate: this.opts.channelDefaults?.fundingFeeRate ?? 20_000n, // live-verified: fnn default 1000 underpays
       public: defaults.public ?? false,
       one_way: defaults.oneWay ?? false,
     });
@@ -112,14 +123,14 @@ export class RealFiberGateway implements FiberGateway {
    * `Received` until cancelled. fnn auto-settles a preimage invoice when
    * the TLC arrives, so this is the immediate-settlement primitive.
    */
-  async createInvoice(amount: bigint): Promise<{ paymentHash: string }> {
+  async createInvoice(amount: bigint): Promise<{ paymentHash: string; invoiceAddress: string }> {
     const preimage = random32Hex();
     const inv = await this.rpc.newInvoice({
       amount,
       currency: this.opts.currency ?? "Fibt",
       payment_preimage: preimage,
     });
-    return { paymentHash: inv.invoice.data.payment_hash };
+    return { paymentHash: inv.invoice.data.payment_hash, invoiceAddress: inv.invoice_address };
   }
 
   async invoiceStatus(paymentHash: string): Promise<"Open" | "Received" | "Paid" | "Cancelled" | "Expired" | "Unknown"> {
@@ -143,13 +154,13 @@ export class RealFiberGateway implements FiberGateway {
    * Hold invoice: created from the payee's preimage (rc7 hold form).
    * Payer funds lock at `Received`; settle with settleInvoice(preimage).
    */
-  async createHoldInvoice(amount: bigint, preimage: string): Promise<{ paymentHash: string }> {
+  async createHoldInvoice(amount: bigint, preimage: string): Promise<{ paymentHash: string; invoiceAddress: string }> {
     const inv = await this.rpc.newInvoice({
       amount,
       currency: this.opts.currency ?? "Fibt",
       payment_preimage: preimage.startsWith("0x") ? preimage : `0x${preimage}`,
     });
-    return { paymentHash: inv.invoice.data.payment_hash };
+    return { paymentHash: inv.invoice.data.payment_hash, invoiceAddress: inv.invoice_address };
   }
 
   async settleInvoice(paymentHash: string, preimage: string): Promise<void> {
@@ -161,11 +172,18 @@ export class RealFiberGateway implements FiberGateway {
   }
 
   async sendToPeer(targetPubkey: string, amount: bigint, paymentHash?: string): Promise<{ paymentHash: string }> {
+    // Keysend: no invoice needed on the recipient side (payouts).
     const res = await this.rpc.sendPayment({
       target_pubkey: targetPubkey,
       amount,
+      keysend: true,
       payment_hash: paymentHash,
     });
+    return { paymentHash: res.payment_hash };
+  }
+
+  async payInvoice(invoice: string): Promise<{ paymentHash: string }> {
+    const res = await this.rpc.sendPayment({ invoice });
     return { paymentHash: res.payment_hash };
   }
 

@@ -122,7 +122,13 @@ export class FiberRpcClient {
 
   openChannel(req: {
     peer_id: string;
+    /** rc7 requires pubkey alongside peer_id (same value). */
+    pubkey?: string;
     funding_amount: bigint;
+    /** Always set: fnn's default (1000) underpays cycle-heavy funding txs and
+     *  they get rejected AFTER broadcast, destroying the channel
+     *  (PoolRejectedTransactionByMinFeeRate, live-verified 2026-09-10). */
+    funding_fee_rate?: bigint;
     public?: boolean;
     one_way?: boolean;
     funding_udt_type_script?: object;
@@ -132,7 +138,14 @@ export class FiberRpcClient {
     return call(this.opts, "open_channel", {
       ...req,
       funding_amount: hexAmount(req.funding_amount),
+      ...(req.funding_fee_rate !== undefined ? { funding_fee_rate: hexAmount(req.funding_fee_rate) } : {}),
     });
+  }
+
+  /** Abandon a stuck pre-funding channel (e.g. an open below the peer's
+   *  auto-accept floor — fnn pins those forever with no rejection). */
+  abandonChannel(req: { channel_id: string }): Promise<null> {
+    return call(this.opts, "abandon_channel", req);
   }
 
   acceptChannel(req: { temporary_channel_id: string; funding_amount?: bigint }): Promise<{ channel_id: string }> {
@@ -170,7 +183,7 @@ export class FiberRpcClient {
     });
   }
 
-  sendPayment(req: { invoice?: string; target_pubkey?: string; amount?: bigint; payment_hash?: string; custom_records?: Record<string, string> }): Promise<FiberPayment> {
+  sendPayment(req: { invoice?: string; target_pubkey?: string; amount?: bigint; payment_hash?: string; keysend?: boolean; custom_records?: Record<string, string> }): Promise<FiberPayment> {
     return call(this.opts, "send_payment", {
       ...req,
       ...(req.amount !== undefined ? { amount: hexAmount(req.amount) } : {}),

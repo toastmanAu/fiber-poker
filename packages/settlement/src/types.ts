@@ -65,6 +65,8 @@ export interface PaymentRequest {
   paymentHash: string;
   /** Invoice address string when the backend produces one. */
   invoice?: string;
+  /** rc7: payer needs the invoice ADDRESS for send_payment. */
+  invoiceAddress?: string;
 }
 
 export interface SettlementAdapter {

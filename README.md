@@ -106,6 +106,25 @@ FIBER_POKER_FNN_TOKEN=<base64 biscuit token> \
 npx vitest run tests/fiber/live-node.test.ts
 ```
 
+And the **full 2-player hand with real settlements** (table node + player
+node, both Biscuit-authed; two poker seats peer-mapped onto the player node
+per docs/15):
+
+```bash
+FIBER_POKER_FNN_URL=http://<table>:8227 FIBER_POKER_FNN_TOKEN=<table biscuit> \
+FIBER_POKER_PLAYER_FNN_URL=http://<player>:8231 FIBER_POKER_PLAYER_FNN_TOKEN=<player biscuit> \
+npx vitest run tests/fiber/live-hand.test.ts
+```
+
+VERIFIED LIVE 2026-09-10/11 against `fnn 0.9.0-rc7`: five real invoice
+payments (buy-ins, blinds, bets) settled payment-before-commit, and the
+payout leg. Channel-opening rules learned the hard way: always pass
+`funding_fee_rate: 20000` (fnn's default 1000 underpays cycle-heavy funding
+txs and they die after broadcast), never open under 100 CKB (peers'
+auto-accept floor silently pins sub-floor opens forever), and a poker
+player's fiber node key differs from their poker session key
+(`FIBER_POKER_PEER_MAP`).
+
 Without the env vars the suite skips. Channel open/close and payment tests
 move testnet funds and require `FIBER_POKER_LIVE_CHANNELS=1` plus
 `FIBER_POKER_LIVE_PEER` (peer multiaddr). RPC auth uses FNN Biscuit tokens

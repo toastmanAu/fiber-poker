@@ -101,6 +101,9 @@ export class TableServer {
   private monitorTimer: NodeJS.Timeout | null = null;
   /** Latest state acknowledgement per player (dispute evidence). */
   private acks = new Map<string, { sequence: string; stateHash: string; at: string }>();
+  /** Poker session pubkey -> Fiber node pubkey (docs/15). */
+  private peerMap = new Map<string, string>();
+  private resolvePeer: (playerId: string) => string = (id) => id;
   /** P10 multiparty seed protocol state (null when idle / server deck). */
   private seedProtocol: { handId: string; stage: "commit" | "reveal" } | null = null;
   /** Players sat out by the seed anti-abort policy this hand. */
@@ -138,13 +141,19 @@ export class TableServer {
       }
     };
 
-    this.channels = new ChannelManager(this.gateway, this.config.channelFunding, this.notify);
-    this.liquidity = new LiquidityManager(this.gateway);
+    // docs/15 topology: a player's fiber node key differs from their poker
+    // session key. The peer map bridges them; identity by default.
+    this.peerMap = new Map(Object.entries(JSON.parse(this.config.peerMapJson ?? "{}") as Record<string, string>));
+    this.resolvePeer = (playerId: string) => this.peerMap.get(playerId) ?? playerId;
+    this.channels = new ChannelManager(this.gateway, this.config.channelFunding, this.notify, this.resolvePeer);
+    this.liquidity = new LiquidityManager(this.gateway, this.resolvePeer);
     this.coordinator = new SettlementCoordinator(this.adapter, this.events, this.notify, {
       // Hold mode: actions commit on HELD liquidity; hand end settles.
       holdMode: this.adapter.constructor.name === "HoldInvoiceSettlement",
       awaitTimeoutMs: this.config.settlementTimeoutMs,
     });
+    // Adapter-level peer resolution (e.g. ImmediateFiberSettlement payouts)
+    // is injected by the test/entrypoint via adapter constructor options.
     this.coordinator.setTableId(this.config.tableId);
     if (this.adapter instanceof FakeSettlementAdapter) {
       this.adapter.autoPayPlayerPayments = this.config.autoPay;
