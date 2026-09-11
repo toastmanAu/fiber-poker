@@ -173,11 +173,15 @@ export class RealFiberGateway implements FiberGateway {
 
   async sendToPeer(targetPubkey: string, amount: bigint, paymentHash?: string): Promise<{ paymentHash: string }> {
     // Keysend: no invoice needed on the recipient side (payouts).
+    // rc7 FORBIDS a payer-supplied payment_hash on keysend
+    // ("keysend payment should not have payment_hash", InvalidParameter —
+    // verified live 2026-09-11). The RESPONSE hash is the only correlation
+    // handle; callers must poll THAT, not a precomputed hash.
+    void paymentHash;
     const res = await this.rpc.sendPayment({
       target_pubkey: targetPubkey,
       amount,
       keysend: true,
-      payment_hash: paymentHash,
     });
     return { paymentHash: res.payment_hash };
   }

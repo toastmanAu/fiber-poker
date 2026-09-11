@@ -26,7 +26,7 @@ import {
   generateKeyPair,
   respondToChallenge,
 } from "@fiber-poker/protocol";
-import { RealFiberGateway } from "@fiber-poker/fiber-adapter";
+import { RealFiberGateway, type FiberGateway } from "@fiber-poker/fiber-adapter";
 
 export interface AgentConfig {
   tableUrl: string;
@@ -38,6 +38,8 @@ export interface AgentConfig {
   label: string;
   /** Fold preflop, then check/call down — minimum-viable headless policy. */
   policy: "tight" | "call-station";
+  /** Sim/tests: use this gateway instead of a real fnn RPC connection. */
+  gateway?: FiberGateway;
 }
 
 interface Pending<T> {
@@ -57,13 +59,13 @@ export class PlayerAgent {
   private stateHash = "";
   private tableId = "fiber-poker-table-1";
   private handId = "";
-  private readonly gateway: RealFiberGateway;
+  private readonly gateway: FiberGateway;
 
   constructor(private readonly cfg: AgentConfig) {
     const keys = this.loadKeys();
     this.privKey = keys.privateKey;
     this.pubkey = keys.publicKey;
-    this.gateway = new RealFiberGateway({
+    this.gateway = cfg.gateway ?? new RealFiberGateway({
       url: cfg.fnnUrl,
       authToken: cfg.fnnToken,
       currency: cfg.currency,
@@ -138,6 +140,18 @@ export class PlayerAgent {
     await this.waitFor("PLAYER_LEFT", 60_000, (m) => (m.payload as { playerId?: string }).playerId === this.pubkey).catch(() => undefined);
   }
 
+  /**
+   * Ask the table for a buy-in top-up. The server applies it between hands
+   * (immediately, or queued when a hand is live) and settles the invoice
+   * through this agent's PAYMENT_REQUIRED auto-pay. Resolves once the chips
+   * are on the stack.
+   */
+  async topUp(amountShannons: bigint, timeoutMs = 120_000): Promise<void> {
+    this.send("TOP_UP", { amountShannons: amountShannons.toString() });
+    await this.waitFor("TOP_UP_APPLIED", timeoutMs);
+    this.log(`top-up applied: ${amountShannons}`);
+  }
+
   private async connect(): Promise<void> {
     this.ws = new WebSocket(this.cfg.tableUrl);
     await new Promise<void>((resolve, reject) => {
@@ -190,6 +204,7 @@ export class PlayerAgent {
   private async payInvoice(invoiceAddress: string): Promise<void> {
     this.log(`paying invoice ${invoiceAddress.slice(0, 28)}…`);
     try {
+      if (!this.gateway.payInvoice) throw new Error("gateway cannot pay invoices");
       const r = await this.gateway.payInvoice(invoiceAddress);
       this.log(`paid ${r.paymentHash.slice(0, 14)}…`);
     } catch (e) {

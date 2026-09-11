@@ -28,6 +28,7 @@ export const SYSTEM_ACTION_TYPES = [
   "SIT_IN",
   "SIT_OUT",
   "STAND_UP",
+  "TOP_UP",
   "START_HAND",
   "POST_BLIND",
   "TIMEOUT_CHECK",

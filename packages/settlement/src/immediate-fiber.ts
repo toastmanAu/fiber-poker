@@ -101,8 +101,12 @@ export class ImmediateFiberSettlement implements SettlementAdapter {
         entry.error = "poll error";
       });
     } else {
-      // Payout / refund: table pays the player's FIBER peer directly.
-      await this.gateway.sendToPeer(this.resolvePeer(obligation.playerId), BigInt(obligation.amountShannons), paymentHash);
+      // Payout / refund: keysend to the player's FIBER peer. rc7 forbids a
+      // payer-supplied payment_hash on keysend — the RESPONSE hash is the
+      // poll handle; correlation with the poker transcript travels via
+      // obligationId in the event log.
+      const sent = await this.gateway.sendToPeer(this.resolvePeer(obligation.playerId), BigInt(obligation.amountShannons));
+      entry.paymentHash = sent.paymentHash;
       this.pollInBackground(entry).catch(() => {
         entry.status = "FAILED";
         entry.error = "poll error";
@@ -172,5 +176,17 @@ export class ImmediateFiberSettlement implements SettlementAdapter {
 
   entry(obligationId: string): Entry | undefined {
     return this.byObligation.get(obligationId);
+  }
+
+  /** Diagnostics: every settlement attempt this adapter has tracked. */
+  allEntries(): { ref: string; obligationId: string; direction: string; amount: string; status: SettlementStatus; error?: string }[] {
+    return [...this.entries.values()].map((e) => ({
+      ref: e.ref.id,
+      obligationId: e.obligation.obligationId,
+      direction: e.obligation.direction,
+      amount: e.obligation.amountShannons,
+      status: e.status,
+      error: e.error,
+    }));
   }
 }

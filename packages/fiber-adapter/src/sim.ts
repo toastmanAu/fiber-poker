@@ -184,6 +184,16 @@ export class SimulatedFiberNetwork {
     return { paymentHash: hash };
   }
 
+  /**
+   * Index an invoice under the user-facing address its gateway issued, so
+   * payers can pay the ADDRESS (the rc7 flow — send_payment takes the
+   * invoice string) instead of the raw payment hash.
+   */
+  aliasInvoice(address: string, paymentHash: string): void {
+    const inv = this.invoices.get(paymentHash);
+    if (inv) this.invoices.set(address, inv);
+  }
+
   payInvoice(payer: string, paymentHash: string): void {
     this.assertOnline(payer);
     const inv = this.invoices.get(paymentHash);
@@ -539,7 +549,9 @@ export class SimNodeGateway implements FiberGateway {
 
   async createInvoice(amount: bigint, paymentHash?: string): Promise<{ paymentHash: string; invoiceAddress: string }> {
     const r = this.net.createInvoice(this.pubkey, amount, paymentHash);
-    return { paymentHash: r.paymentHash, invoiceAddress: `sim-invoice-${r.paymentHash.slice(0, 12)}` };
+    const invoiceAddress = `sim-invoice-${r.paymentHash.slice(0, 12)}`;
+    this.net.aliasInvoice(invoiceAddress, r.paymentHash);
+    return { paymentHash: r.paymentHash, invoiceAddress };
   }
 
   async invoiceStatus(paymentHash: string): Promise<"Open" | "Received" | "Paid" | "Cancelled" | "Expired" | "Unknown"> {
@@ -551,7 +563,9 @@ export class SimNodeGateway implements FiberGateway {
     // sim settles only via explicit settleInvoice (no auto-settle), unlike
     // rc7 which auto-settles when the payee knows the preimage.
     const r = this.net.createInvoice(this.pubkey, amount, preimage, { hold: true, preimageHash: preimage });
-    return { paymentHash: r.paymentHash, invoiceAddress: `sim-hold-${r.paymentHash.slice(0, 12)}` };
+    const invoiceAddress = `sim-hold-${r.paymentHash.slice(0, 12)}`;
+    this.net.aliasInvoice(invoiceAddress, r.paymentHash);
+    return { paymentHash: r.paymentHash, invoiceAddress };
   }
 
   async settleInvoice(paymentHash: string, preimage: string): Promise<void> {

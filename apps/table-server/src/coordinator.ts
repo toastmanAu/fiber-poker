@@ -114,7 +114,26 @@ export class SettlementCoordinator {
 
     let lastError = "";
     for (let attempt = 1; attempt <= this.retries; attempt++) {
-      const ref = await this.adapter.reserveOrPay(obligation);
+      let ref: SettlementRef;
+      try {
+        ref = await this.adapter.reserveOrPay(obligation);
+      } catch (e) {
+        // A thrown side effect (RPC error, bad request) is a definitive
+        // failed attempt — never let it kill the caller's chain (e.g.
+        // settleHand), which would strand the table mid-phase.
+        lastError = `attempt ${attempt}: ${String(e)}`;
+        await this.events.append({
+          tableId: obligation.tableId,
+          handId: obligation.handId || null,
+          sequence: obligation.sequence,
+          eventType: "PaymentFailed",
+          createdAt: new Date().toISOString(),
+          payload: { obligationId: obligation.obligationId, attempt, error: String(e) },
+          fiberRef: null,
+        });
+        if (attempt < this.retries) await new Promise((r) => setTimeout(r, this.retryDelayMs * attempt));
+        continue;
+      }
       // Idempotent adapters return the original ref; record the correlation.
       await this.events.append({
         tableId: obligation.tableId,

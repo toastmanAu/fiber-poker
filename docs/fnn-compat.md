@@ -589,3 +589,40 @@ event log. Simulators updated to match.
 - Channel open: attempted; stalled at acceptor wallet (see #4). To finish
   the 2-player funded-hand test, the accepting node (driveThree) needs
   on-chain funds, or a manual `accept_channel` via its own Biscuit token.
+
+### Keysend payout finding — CRITICAL (live-verified 2026-09-11)
+
+`send_payment { target_pubkey, amount, keysend: true, payment_hash: <hex> }`
+is **REJECTED synchronously** by rc7:
+
+```
+-32000 InvalidParameter: Failed to validate payment request:
+"keysend payment should not have payment_hash"
+```
+
+The desk-note at §3.7 ("required unless an invoice or keysend supplies it")
+describes the payer's OBLIGATION, not a permission: with `keysend: true` fnn
+derives the hash itself from the generated preimage and a payer-supplied hash
+is a validation error. Consequences that cost a session:
+
+- Every TABLE_TO_PLAYER payout built as "keysend with deterministic hash"
+  fails instantly. Because the failure THROWS out of
+  `SettlementAdapter.reserveOrPay`, an unguarded caller (settleHand's payout
+  fulfil) dies mid-chain: the phase is stranded in `SETTLEMENT`,
+  `DISTRIBUTE_POTS` never commits, hands stop, and between-hands queues
+  (top-ups, leaves) never drain. Symptom: a table that goes silent right
+  after its first HAND_RESULT.
+- Polling correlation must use the `send_payment` RESPONSE `payment_hash`
+  (`res.payment_hash`), never a precomputed one.
+
+Fixes shipped with this finding:
+
+- `RealFiberGateway.sendToPeer` no longer sends `payment_hash` with keysend
+  (the parameter is ignored) and returns the response hash.
+- `ImmediateFiberSettlement` / `HoldInvoiceSettlement` payout paths adopt the
+  response hash as the poll handle; transcript correlation travels via
+  obligationId in the event log (same policy as rc7 invoices).
+- `SettlementCoordinator.fulfilOne` converts `reserveOrPay` throws into a
+  recorded `PaymentFailed` attempt (with retries) instead of letting them
+  break the caller — a settlement failure now fail-stops COHERENTLY via
+  `LiquidityManager.pause` rather than stranding the phase.

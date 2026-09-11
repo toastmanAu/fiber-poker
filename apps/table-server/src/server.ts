@@ -86,6 +86,8 @@ export class TableServer {
   private wss: WebSocketServer | null = null;
   private seats = new Map<string, SeatRecord>();
   private leaveQueue = new Set<string>();
+  /** playerId -> accumulated top-up shannons awaiting a between-hands window. */
+  private topupQueue = new Map<string, bigint>();
   private joinQueue: { playerId: string; seat: number; buyIn: bigint; channelId: string }[] = [];
   private usedNonces = new Set<string>();
   private turnTimers = new Map<string, NodeJS.Timeout>();
@@ -466,6 +468,9 @@ export class TableServer {
       case "LEAVE_REQUEST":
         await this.runExclusive(() => this.requestLeave(socket));
         return;
+      case "TOP_UP":
+        await this.runExclusive(() => this.requestTopUp(socket, payload));
+        return;
       case "SIT_IN":
       case "SIT_OUT":
         await this.runExclusive(() => this.sitInOut(socket, type === "SIT_IN"));
@@ -705,6 +710,75 @@ export class TableServer {
     }
   }
 
+  /**
+   * Buy-in top-up for a seated player (docs/10 D009: between hands only).
+   * Payment-before-commit, exactly like the initial buy-in; mid-hand
+   * requests are queued and applied by processMembershipQueues.
+   */
+  private async requestTopUp(socket: WebSocket, payload: Record<string, unknown>): Promise<void> {
+    const session = this.sessions.get(socket);
+    if (!session) {
+      this.sendTo(socket, makeMessage("ERROR", { code: "UNAUTHENTICATED", detail: "authenticate first" }));
+      return;
+    }
+    if (!this.seats.has(session.playerId)) {
+      this.sendTo(socket, makeMessage("ERROR", { code: "NOT_SEATED", detail: "join the table before topping up" }));
+      return;
+    }
+    let amount: bigint;
+    try {
+      amount = BigInt(String(payload.amountShannons ?? ""));
+    } catch {
+      amount = 0n;
+    }
+    if (amount <= 0n) {
+      this.sendTo(socket, makeMessage("ERROR", { code: "INVALID_AMOUNT", detail: "amountShannons must be positive" }));
+      return;
+    }
+    const phase = this.runtime.state.phase;
+    if (phase !== "WAITING" && phase !== "HAND_COMPLETE") {
+      this.topupQueue.set(session.playerId, (this.topupQueue.get(session.playerId) ?? 0n) + amount);
+      this.notify(session.playerId, { type: "SEAT_STATUS", payload: { lifecycle: "TOP_UP_QUEUED" } });
+      return;
+    }
+    await this.processTopUp(session.playerId, amount);
+  }
+
+  private async processTopUp(playerId: string, amount: bigint): Promise<void> {
+    const settled = await this.coordinator.fulfil(
+      [
+        {
+          kind: "PAY_TABLE" as const,
+          playerId,
+          amount,
+          reason: "TOP_UP" as const,
+          obligationId: `topup:${playerId.slice(0, 12)}:${Date.now()}-${++this.commitCount}`,
+        },
+      ],
+      { handId: "", sequence: this.runtime.tip.sequence, actionHash: `topup:${playerId.slice(0, 10)}` },
+    );
+    if (settled !== "SETTLED") {
+      this.notify(playerId, { type: "ERROR", payload: { code: "TOP_UP_FAILED", detail: "settlement failed" } });
+      return;
+    }
+    const r = await this.runtime.commit({ type: "TOP_UP", playerId, amount });
+    if (!r.ok) {
+      this.notify(playerId, { type: "ERROR", payload: { code: r.code, detail: r.detail } });
+      return;
+    }
+    this.notify(playerId, { type: "TOP_UP_APPLIED", payload: { amount: amount.toString() } });
+    this.broadcastState(r.result);
+    this.maybeSnapshot(r.result.eventId);
+  }
+
+  private async processTopUpQueue(): Promise<void> {
+    for (const [playerId, amount] of [...this.topupQueue]) {
+      this.topupQueue.delete(playerId);
+      if (!this.seats.has(playerId)) continue; // left before the window opened
+      await this.processTopUp(playerId, amount);
+    }
+  }
+
   private async sitInOut(socket: WebSocket, sitIn: boolean): Promise<void> {
     const session = this.sessions.get(socket);
     if (!session) return;
@@ -723,12 +797,13 @@ export class TableServer {
     this.broadcastState(r.result);
   }
 
-  /** Membership queue: queued joins apply first, then leave payouts. */
+  /** Membership queue: queued joins apply first, then top-ups, then leave payouts. */
   private async processMembershipQueues(): Promise<void> {
     for (const pending of [...this.joinQueue]) {
       await this.seatPlayer(pending.playerId, pending.seat, pending.buyIn, pending.channelId);
       this.joinQueue = this.joinQueue.filter((j) => j.playerId !== pending.playerId);
     }
+    await this.processTopUpQueue();
     await this.processLeaveQueue();
   }
 

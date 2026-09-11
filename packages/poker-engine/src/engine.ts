@@ -106,6 +106,8 @@ function applyAction(state: TableState, action: PokerAction): ApplyOutcome {
       return sitInOut(state, action.playerId, true);
     case "STAND_UP":
       return standUp(state, action.playerId);
+    case "TOP_UP":
+      return topUp(state, action.playerId, action.amount);
     case "START_HAND":
       return startHand(state, action);
     case "POST_BLIND":
@@ -197,6 +199,20 @@ function standUp(state: TableState, playerId: string): ApplyOutcome {
   seat.actedThisStreet = false;
   seat.holeCards = [];
   return { obligations: [], summary: `stand_up:${playerId}` };
+}
+
+/**
+ * Add chips to a seated player's stack between hands. Like SIT_DOWN, the
+ * reducer carries no obligations: the table fulfils the player's TOP_UP
+ * payment (payment-before-commit) BEFORE applying this action.
+ */
+function topUp(state: TableState, playerId: string, amount: Shannon): ApplyOutcome {
+  requireBetweenHands(state);
+  const seat = seatByPlayer(state, playerId);
+  if (!seat) throw new PokerError("NOT_SEATED", `player ${playerId} not seated`);
+  if (amount <= 0n) throw new PokerError("INVALID_AMOUNT", "top-up amount must be positive");
+  seat.stack += amount;
+  return { obligations: [], summary: `top_up:${playerId}:${amount}` };
 }
 
 function sitInOut(state: TableState, playerId: string, out: boolean): ApplyOutcome {

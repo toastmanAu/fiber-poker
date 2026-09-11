@@ -69,19 +69,20 @@ export class HoldInvoiceSettlement implements SettlementAdapter {
     if (obligation.direction === "TABLE_TO_PLAYER") {
       // Payouts are immediate in hold mode (handled by the gateway send path
       // of the coordinator; here we just track the send as INFLIGHT→SUCCEEDED
-      // via payment status polling).
-      const paymentHash = holdInvoiceHashFor(obligation);
+      // via payment status polling). rc7 keysend forbids a payer-supplied
+      // payment_hash — poll the RESPONSE hash.
       const entry: HeldEntry = {
         ref,
         obligation,
-        paymentHash,
+        paymentHash: "",
         preimage: "",
         status: "INFLIGHT",
         attempts,
       };
       this.entries.set(ref.id, entry);
       this.byObligation.set(obligation.obligationId, entry);
-      await this.gateway.sendToPeer(obligation.playerId, BigInt(obligation.amountShannons), paymentHash);
+      const sent = await this.gateway.sendToPeer(obligation.playerId, BigInt(obligation.amountShannons));
+      entry.paymentHash = sent.paymentHash;
       void this.pollPayout(entry).catch(() => {
         entry.status = "FAILED";
         entry.error = "payout poll error";

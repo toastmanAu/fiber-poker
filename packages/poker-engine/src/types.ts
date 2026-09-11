@@ -99,6 +99,7 @@ export type PokerActionType =
   | "SIT_IN"
   | "SIT_OUT"
   | "STAND_UP"
+  | "TOP_UP"
   | "START_HAND"
   | "POST_BLIND"
   | "CHECK"
@@ -117,6 +118,7 @@ export type PokerAction =
   | { type: "SIT_IN"; playerId: PlayerId }
   | { type: "SIT_OUT"; playerId: PlayerId }
   | { type: "STAND_UP"; playerId: PlayerId }
+  | { type: "TOP_UP"; playerId: PlayerId; amount: Shannon }
   | {
       type: "START_HAND";
       handId: HandId;
@@ -136,7 +138,7 @@ export type PokerAction =
   | { type: "DISTRIBUTE_POTS" }
   | { type: "ABORT_HAND"; reason: string };
 
-export type ObligationReason = "SMALL_BLIND" | "BIG_BLIND" | "CALL" | "BET" | "RAISE" | "PAYOUT" | "REFUND";
+export type ObligationReason = "SMALL_BLIND" | "BIG_BLIND" | "CALL" | "BET" | "RAISE" | "TOP_UP" | "PAYOUT" | "REFUND";
 
 export interface EconomicObligation {
   kind: "PAY_TABLE" | "PAY_PLAYER";
