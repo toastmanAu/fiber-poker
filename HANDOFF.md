@@ -14,15 +14,16 @@ the project stands, how to reach the live test environment, and what remains.
 
 | Milestone | State |
 |---|---|
-| P0–P8 (engine → web client) | ✅ production code, 105 unit/integration tests green |
+| P0–P8 (engine → web client) | ✅ production code, 108 unit/integration tests green |
 | P9 hold-invoice experiment | ✅ implemented, live-verified primitives |
 | P10 multiparty seed commit/reveal | ✅ implemented + e2e tests |
 | P11 mental poker | ✅ research prototype + `docs/mental-poker-research.md` |
 | P12 generalized CKB poker channel | ✅ simulator + `docs/poker-channel-research.md` |
 | **Live testnet validation** | ✅ real money moved on `fnn 0.9.0-rc7` (details §3) |
 | **Player agent** | ✅ `apps/player-agent`, live-verified (details §3) |
+| **Multi-hand live session** | ✅ top-up + dual cash-out live (details §3.6) |
 
-Suite: **105 pass + 7 gated-skip (live tests run only with env vars)**.
+Suite: **108 pass + 8 gated-skip (live tests run only with env vars)**.
 Typecheck clean. Everything committed and pushed.
 
 Run everything from `~/fiber-poker/fiber-poker`:
@@ -68,13 +69,23 @@ FIBER_POKER_FNN_URL=http://192.168.68.80:8227 FIBER_POKER_FNN_TOKEN=$TTOK \
 FIBER_POKER_FNN_URL=http://192.168.68.80:8227 FIBER_POKER_FNN_TOKEN=$TTOK \
 FIBER_POKER_PLAYER_FNN_URL=http://192.168.68.102:8231 FIBER_POKER_PLAYER_FNN_TOKEN=$DTOK \
   npx vitest run tests/fiber/live-agent-hand.test.ts
+
+# full multi-hand SESSION (3 hands + 5 CKB top-up + dual cash-out +
+# cooperative channel close, ~25 CKB total):
+FIBER_POKER_FNN_URL=http://192.168.68.80:8227 FIBER_POKER_FNN_TOKEN=$TTOK \
+FIBER_POKER_PLAYER_FNN_URL=http://192.168.68.102:8231 FIBER_POKER_PLAYER_FNN_TOKEN=$DTOK \
+  npx vitest run tests/fiber/live-multihand.test.ts
 ```
 
-Channel state (2026-09-11): **4 ChannelReady channels** between the nodes.
-Table outbound ≈ 486 CKB (1 + 400 + ~85 split), player outbound ≈ 450+ CKB.
-Both wallets also hold on-chain change (table ~194k CKB across 9 cells,
-driveThree ~100k in 1 cell). Stale ghost channels in `list_channels
-{only_pending:true}` are cosmetic residue of sub-floor opens — no funds.
+Channel state (2026-09-11, after the multi-hand session): **2 ChannelReady
+channels** between the nodes (`0xa118…` table 0 / player 51 CKB,
+`0xa133…` table 168 / player 233 CKB). The multi-hand session used and
+cooperatively CLOSED a third channel (its final tx is on-chain). fnn routes
+keysend payments over ANY channel to the peer with capacity — the session's
+"own" channel is only a mapping/bookkeeping handle. Both wallets also hold
+on-chain change (table ~194k CKB, driveThree ~100k). Stale ghost channels in
+`list_channels {only_pending:true}` are cosmetic residue of sub-floor opens
+— no funds.
 
 ---
 
@@ -116,24 +127,49 @@ All recorded in `docs/fnn-compat.md` ("VERIFIED AGAINST A LIVE NODE"):
 5. **Biscuit auth**: per-node roots (a token minted for one node can never
    auth against the other — bare `Unauthorized`, no hint). Auth middleware
    runs after JSON parse (parse error `-32700` precedes `-32999`).
+6. **CRITICAL keysend semantics (2026-09-11)**: `send_payment` REJECTS
+   `keysend: true` + `payment_hash` (`InvalidParameter: "keysend payment
+   should not have payment_hash"`). Payouts keysend WITHOUT a hash and poll
+   the RESPONSE `payment_hash`; transcript correlation travels via
+   obligationId in the event log. Before the fix, every payout THREW inside
+   `settleHand`, which stranded the phase in `SETTLEMENT` and silently
+   froze the table (no `DISTRIBUTE_POTS`, no hand 2, no queue drains).
+   `SettlementCoordinator.fulfilOne` now converts adapter throws into
+   recorded failed attempts (coherent fail-stop). Full write-up:
+   `docs/fnn-compat.md` → "Keysend payout finding".
+7. **Multi-hand live session verified** (2026-09-11, don't re-prove):
+   3 chained hands, mid-session TOP_UP (queued mid-hand, applied between
+   hands), dual cash-out — seat-by-seat payouts then ONE cooperative
+   shutdown for the shared channel. LAN nodes are FAST: a full 3-hand
+   session with 15 real invoices settles in ~7s; `list_channels` order is
+   not stable, so never assume "first ready channel" is stable across
+   calls.
 
 ---
 
 ## 4. Remaining work (prioritized)
 
 ### P1 — finish the live 2-player table story
-- [ ] **Multi-hand session on live nodes**: current live test plays ONE
-      hand. Extend to a multi-hand session with buy-in top-ups between
-      hands and a final cash-out (leave flow: finish hand → payout →
-      cooperative `shutdown_channel` → seat removed) — the leave/cash-out
-      flow is written but only fake-mode tested.
+- [x] **Multi-hand session on live nodes** (DONE 2026-09-11, commit
+      15dad8e): `tests/fiber/live-multihand.test.ts` plays THREE chained
+      hands, tops up the losing seat 5 CKB between hands (queued mid-hand,
+      drained between hands), then cashes out BOTH seats: payout →
+      cooperative `shutdown_channel` → seat removed. Passed live.
+      Along the way it exposed and fixed the rc7 keysend payout bug (§3.6)
+      and the shared-channel close race (ChannelManager now refcounts
+      channels; close fires only on the last seat).
 - [ ] **6-agent live demo**: scale the 2-agent harness to 6 seats (the
       shared-player-node trick means only ONE fiber node is needed as the
-      backing for all 6). Watch side pots + odd chips with real money.
+      backing for all 6 — the ChannelManager refcount makes shared-channel
+      leaves safe now). Watch side pots + odd chips with real money.
+      Rehearsal pattern: `tests/fiber/multihand-session.test.ts` runs the
+      exact live topology on the simulator (PlayerAgent gateway injection).
 - [ ] **Hold-mode live test** (P9): the hold invoice primitives are
       live-verified; run `HoldInvoiceSettlement` table server against the
       real nodes (set `FIBER_POKER_SETTLEMENT=hold`) and verify
-      hold-at-bet → settle-at-hand-end over the wire.
+      hold-at-bet → settle-at-hand-end over the wire. NOTE: hold.ts payout
+      path was fixed together with the keysend finding — poll the response
+      hash.
 
 ### P2 — channel opening robustness
 - [ ] Wire `classifyFundingAmount()` (scaffolded in the other agent's
@@ -195,6 +231,16 @@ All recorded in `docs/fnn-compat.md` ("VERIFIED AGAINST A LIVE NODE"):
    FRESH message (e.g. post-restart), filter by sequence/hash, not type.
 7. **Conservation assertion mid-hand**: assert `stack + handContribution`
    (+ pots/awards only at settlement), never `stack` alone.
+8. **Fast sim ≠ fast live, and racy counts**: on the simulator hands chain
+   in ms, so `state.handNo` can advance past your assertion mid-test —
+   assert `>= N` and filter HAND_RESULT waits by distinct handId. On live
+   nodes the opposite risk: settlement pacing varies, so give TOP_UP /
+   HAND_RESULT waits generous (300s) budgets.
+9. **Auto-restart races the between-hands window**: hands restart
+   immediately after `DISTRIBUTE_POTS`. Anything that must run between
+   hands (top-ups, leaves) must be QUEUED server-side, never timed by the
+   client — that's what `topupQueue`/`leaveQueue` +
+   `processMembershipQueues` are for.
 
 ---
 
