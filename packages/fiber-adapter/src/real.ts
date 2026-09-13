@@ -48,6 +48,15 @@ function toGatewayChannel(c: FiberChannel): GatewayChannel {
   };
 }
 
+/** Typed failure for an open that rc7 pinned in NegotiatingFunding (the
+ *  ghost has been abandoned already); callers may retry once. */
+export class ChannelOpenStalledError extends Error {
+  constructor(readonly peerPubkey: string, readonly channelId: string) {
+    super(`channel open to ${peerPubkey.slice(0, 16)}… stalled in NegotiatingFunding; abandoned ${channelId.slice(0, 18)}…`);
+    this.name = "ChannelOpenStalledError";
+  }
+}
+
 export class RealFiberGateway implements FiberGateway {
   private readonly rpc: FiberRpcClient;
   private pubkeyCache?: string;
@@ -74,9 +83,10 @@ export class RealFiberGateway implements FiberGateway {
 
   async openChannel(peerPubkey: string, fundingAmount: bigint): Promise<{ channelId: string }> {
     const defaults = this.opts.channelDefaults ?? { public: false, oneWay: false };
-    // Handoff-verified floor: under 99 CKB (initiator reserve) the channel is
-    // useless regardless of peer config; under the peer's 100 CKB auto-accept
-    // floor it is pinned in NegotiatingFunding forever with no rejection.
+    // Hard floor (see open-channel-defaults.ts): under the 99 CKB initiator
+    // reserve the channel could never spend. (Below the PEER's floor the
+    // ChannelManager bumps the amount BEFORE calling this — see
+    // classifyFundingAmount; a peer-floor stall here gets abandoned.)
     if (fundingAmount < 100n * 100_000_000n) {
       throw new Error("funding below 100 CKB: no spendable balance and peers auto-accept floor blocks it");
     }
@@ -88,17 +98,56 @@ export class RealFiberGateway implements FiberGateway {
       public: defaults.public ?? false,
       one_way: defaults.oneWay ?? false,
     });
-    // The counterparty must accept for the channel to materialize. Real
-    // deployments pair the table (accepting player opens) with players
-    // opening; poll list_channels for the finalized id.
+    void temporary_channel_id;
+    // The counterparty must accept for the channel to materialize. Poll
+    // list_channels for the finalized id (live rc7 entry shape: peer field
+    // `pubkey`, nested `state.state_name`).
     const deadline = Date.now() + 120_000;
     for (;;) {
       const { channels } = await this.rpc.listChannels({});
-      const mine = channels.find((c) => c.peer_pubkey === peerPubkey && c.state_name !== "Closed");
+      const mine = channels.find((c) => c.pubkey === peerPubkey && c.state.state_name !== "Closed");
       if (mine) return { channelId: mine.channel_id };
-      if (Date.now() > deadline) throw new Error(`channel with ${peerPubkey} did not finalize`);
+      if (Date.now() > deadline) {
+        // Stalled open (rc7 pins below-floor or underfunded-acceptor opens
+        // in NegotiatingFunding forever, with no rejection): abandon the
+        // ghost so nothing pins, then fail with a typed error the caller
+        // can retry on.
+        try {
+          const pending = await this.rpc.listChannels({ only_pending: true });
+          const stuck = pending.channels.find(
+            (c) => c.pubkey === peerPubkey && c.state.state_name === "NegotiatingFunding",
+          );
+          if (stuck) {
+            await this.rpc.abandonChannel({ channel_id: stuck.channel_id }).catch(() => undefined);
+            throw new ChannelOpenStalledError(peerPubkey, stuck.channel_id);
+          }
+        } catch (e) {
+          if (e instanceof ChannelOpenStalledError) throw e;
+          // fall through to the generic failure
+        }
+        throw new Error(`channel with ${peerPubkey} did not finalize`);
+      }
       await new Promise((r) => setTimeout(r, 500));
     }
+  }
+
+  /** P2: the peer's gossiped auto-accept minimum (best-effort, bounded). */
+  async peerAutoAcceptFloor(peerPubkey: string): Promise<bigint | undefined> {
+    let cursor: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const res = await this.rpc.listGraphNodes(cursor ? { last_cursor: cursor } : {});
+      const mine = res.nodes.find((n) => n.pubkey === peerPubkey);
+      if (mine?.auto_accept_min_ckb_funding_amount !== undefined) {
+        return parseAmount(mine.auto_accept_min_ckb_funding_amount);
+      }
+      if (!res.last_cursor || res.last_cursor === cursor) return undefined;
+      cursor = res.last_cursor;
+    }
+    return undefined;
+  }
+
+  async abandonChannel(channelId: string): Promise<void> {
+    await this.rpc.abandonChannel({ channel_id: channelId });
   }
 
   async listChannels(): Promise<GatewayChannel[]> {

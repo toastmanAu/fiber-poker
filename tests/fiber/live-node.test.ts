@@ -16,7 +16,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { FiberRpcClient, FiberRpcError } from "@fiber-poker/fiber-adapter";
+import { FiberRpcClient, FiberRpcError, RealFiberGateway } from "@fiber-poker/fiber-adapter";
 
 const URL_ = process.env.FIBER_POKER_FNN_URL;
 const TOKEN = process.env.FIBER_POKER_FNN_TOKEN;
@@ -41,6 +41,17 @@ d("live FNN node", () => {
     if (TOKEN) return; // only meaningful without a valid token
     const bad = new FiberRpcClient({ url: URL_!, authToken: "invalid-token" });
     await expect(bad.nodeInfo()).rejects.toThrow(FiberRpcError);
+  });
+
+  it("resolves a peer's gossiped auto-accept floor via graph_nodes (P2)", async () => {
+    const gateway = new RealFiberGateway({ url: URL_!, authToken: TOKEN, currency: "Fibt" });
+    const { channels } = await client().listChannels({});
+    const peer = channels.find((c) => c.pubkey)?.pubkey;
+    if (!peer) return; // no peers connected: nothing to look up
+    const floor = await gateway.peerAutoAcceptFloor(peer);
+    // A gossiped floor is a positive shannons amount when present.
+    expect(floor === undefined || floor > 0n).toBe(true);
+    if (floor !== undefined) console.log(`[live] peer ${peer.slice(0, 12)}… auto-accept floor: ${floor} shannons`);
   });
 
   it("lists channels with PascalCase state names and 0x-hex balances", async () => {

@@ -665,3 +665,28 @@ simulator structurally could NOT catch — both fixed:
 Also note: the settle credit is asynchronous relative to `settle_invoice`
 acceptance, so `finalize` now waits for the invoice to reach `Paid`
 before reporting success — payouts must never race the credit.
+
+### Channel-opening policy shipped (P2, 2026-09-11)
+
+- `graph_nodes` verified live: params `{}` returns every gossiped node plus
+  `last_cursor`; entries carry `pubkey` and
+  `auto_accept_min_ckb_funding_amount` (hex shannons). Live lookup of
+  driveThree: **100 CKB** — matches the 99-CKB auto-accept error observed
+  during opens. Wired as `RealFiberGateway.peerAutoAcceptFloor(peer)`
+  (paginated, bounded).
+- `classifyFundingAmount` (packages/fiber-adapter/src/open-channel-defaults.ts):
+  hard-block below 100 CKB (99 CKB initiator reserve + 1 CKB headroom),
+  bump to the peer's floor when the request is under it. The ChannelManager
+  applies it before every open and notifies the seat of any bump.
+- `abandon_channel` probed live against a Closed pending-list corpse:
+  `-32000 Invalid parameter: Channel Hash256(...) not found` — Closed
+  corpses are already terminal and can NOT be abandoned; they stay
+  cosmetic. The RPC's real use is abandoning NegotiatingFunding stalls:
+  `RealFiberGateway.openChannel` now detects a stalled open (2 min),
+  abandons the ghost, and throws `ChannelOpenStalledError`; the
+  ChannelManager retries exactly once. (The stall path itself is
+  stub-tested only — no live stall exists to reproduce.)
+- Fixed while wiring: the open-poll in `openChannel` read `peer_pubkey`/
+  `state_name`, which rc7 entries do not have (`pubkey` / nested
+  `state.state_name`) — the poll could never have recognized a
+  materialized channel.

@@ -10,7 +10,7 @@
  * gating happens separately (LiquidityManager).
  */
 
-import type { FiberGateway } from "@fiber-poker/fiber-adapter";
+import { classifyFundingAmount, type FiberGateway } from "@fiber-poker/fiber-adapter";
 
 export type SeatLifecycle =
   | "DISCONNECTED"
@@ -75,8 +75,41 @@ export class ChannelManager {
     if (existing) {
       channelId = existing.channelId;
     } else {
-      const opened = await this.gateway.openChannel(peer, this.fundingAmount);
-      channelId = opened.channelId;
+      // P2 funding policy: hard-block useless opens, bump below-floor opens
+      // to the peer's gossiped auto-accept minimum (an under-floor open is
+      // pinned in NegotiatingFunding forever), and on a stalled open (the
+      // gateway has already abandoned the ghost) retry exactly once.
+      let amount = this.fundingAmount;
+      let floor: bigint | undefined;
+      try {
+        floor = await this.gateway.peerAutoAcceptFloor?.(peer);
+      } catch {
+        /* gossip lookup is best-effort */
+      }
+      const verdict = classifyFundingAmount(amount, floor);
+      if (verdict.verdict === "below-reserve") throw new Error(verdict.detail);
+      if (verdict.verdict === "bumped-to-peer-floor") {
+        amount = verdict.openAmount;
+        this.notify(playerPubkey, {
+          type: "CHANNEL_STATUS",
+          payload: {
+            channelId: null,
+            state: "CHANNEL_NEGOTIATING",
+            fundingBumpedFrom: verdict.requested.toString(),
+            fundingBumpedTo: verdict.openAmount.toString(),
+          },
+        });
+      }
+      try {
+        const opened = await this.gateway.openChannel(peer, amount);
+        channelId = opened.channelId;
+      } catch (e) {
+        const stalled = e instanceof Error && e.name === "ChannelOpenStalledError";
+        if (!stalled) throw e;
+        // The ghost is gone; give the acceptor exactly one more chance.
+        const retry = await this.gateway.openChannel(peer, amount);
+        channelId = retry.channelId;
+      }
     }
     this.channels.set(playerPubkey, channelId);
     const users = this.channelUsers.get(channelId) ?? new Set<string>();

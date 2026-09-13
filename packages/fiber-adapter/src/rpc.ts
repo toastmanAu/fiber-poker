@@ -107,6 +107,15 @@ export interface FiberPayment {
   [k: string]: unknown;
 }
 
+/** A gossiped network node (graph_nodes entry; verified live 2026-09-11 —
+ *  identity field is `pubkey`, auto-accept floor is a hex shannons string,
+ *  pagination cursor is `last_cursor`). */
+export interface GraphNode {
+  pubkey: string;
+  auto_accept_min_ckb_funding_amount?: string;
+  [k: string]: unknown;
+}
+
 const CHANNEL_READY = "ChannelReady";
 
 export class FiberRpcClient {
@@ -146,6 +155,16 @@ export class FiberRpcClient {
    *  auto-accept floor — fnn pins those forever with no rejection). */
   abandonChannel(req: { channel_id: string }): Promise<null> {
     return call(this.opts, "abandon_channel", req);
+  }
+
+  /** Gossiped network nodes (P2 peer-floor lookups). Verified live:
+   *  params {} returns every node plus a `last_cursor`; entries carry
+   *  `pubkey` and `auto_accept_min_ckb_funding_amount` (hex shannons). */
+  listGraphNodes(req: { pagesize?: bigint; last_cursor?: string } = {}): Promise<{ nodes: GraphNode[]; last_cursor: string }> {
+    return call(this.opts, "graph_nodes", {
+      ...(req.pagesize !== undefined ? { pagesize: hexAmount(req.pagesize) } : {}),
+      ...(req.last_cursor !== undefined ? { last_cursor: req.last_cursor } : {}),
+    });
   }
 
   acceptChannel(req: { temporary_channel_id: string; funding_amount?: bigint }): Promise<{ channel_id: string }> {

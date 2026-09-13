@@ -47,4 +47,11 @@ export interface FiberGateway {
   /** Payer-side: pay an invoice address (player agent flow). */
   payInvoice?(invoice: string): Promise<{ paymentHash: string }>;
   paymentStatus(paymentHash: string): Promise<"Created" | "Inflight" | "Success" | "Failed" | "Unknown">;
+  /** P2: the peer's gossiped auto-accept minimum funding (shannons);
+   *  undefined when the gossip lookup cannot find the peer. */
+  peerAutoAcceptFloor?(peerPubkey: string): Promise<bigint | undefined>;
+  /** P2: abandon a stuck pre-materialized channel (NegotiatingFunding
+   *  ghost). Closed corpses are NOT abandonable (rc7 answers "not found")
+   *  — they are already terminal and harmless. */
+  abandonChannel?(channelId: string): Promise<void>;
 }

@@ -187,17 +187,27 @@ All recorded in `docs/fnn-compat.md` ("VERIFIED AGAINST A LIVE NODE"):
       simulator-invisible integration fixes are in
       `docs/fnn-compat.md` → "Hold-mode live session findings".
 
-### P2 — channel opening robustness
-- [ ] Wire `classifyFundingAmount()` (scaffolded in the other agent's
-      `~/fiber-hack/packages/core/src/open-channel-defaults.ts`): block
-      below 99 CKB reserve, warn between reserve and the peer's actual
-      floor read from `graph_nodes[].auto_accept_min_ckb_funding_amount`
-      (identity field is `pubkey`; paginate via `last_cursor`).
-- [ ] Stuck-open detection in `ChannelManager`: after open, poll; if
-      `NegotiatingFunding && !is_acceptor` past timeout → `abandon_channel`
-      + retry at a higher amount. Never leave pinned ghosts.
-- [ ] Verify the funding fee rate scales: 20000 was validated for ~500 CKB
-      opens; re-check for larger funding if used.
+### P2 — channel opening robustness — ✅ DONE (2026-09-11, stub-tested + live floor lookup)
+- [x] `classifyFundingAmount()` (packages/fiber-adapter/src/open-channel-defaults.ts):
+      hard-block below 100 CKB (99 CKB initiator reserve + headroom), bump
+      to the peer's gossiped floor otherwise. Peer floor wired LIVE:
+      `RealFiberGateway.peerAutoAcceptFloor` paginates `graph_nodes`
+      (driveThree's gossiped floor reads exactly 100 CKB). The
+      ChannelManager classifies before every open and notifies the seat of
+      any bump. Tests: `tests/fiber/open-channel-policy.test.ts`; live
+      lookup in `tests/fiber/live-node.test.ts`.
+- [x] Stuck-open detection: `RealFiberGateway.openChannel` abandons a
+      NegotiatingFunding ghost after its 2-min poll and throws
+      `ChannelOpenStalledError`; the ChannelManager retries exactly once.
+      NOTE: `abandon_channel` probed live against a Closed corpse answers
+      "not found" — corpses are terminal, stay cosmetic (P4's filter idea
+      still stands); the stall path itself is stub-tested only.
+      ALSO FIXED: the open-poll read `peer_pubkey`/`state_name` — fields
+      rc7 does not return (`pubkey`/`state.state_name`), so it could never
+      have recognized a materialized channel.
+- [x] Funding fee rate: unchanged at 20000 (validated for ≤1000 CKB opens;
+      the classifier/bump path reuses the same fee rate — re-check only if
+      funding multi-thousand-CKB channels ever).
 
 ### P3 — web client on live nodes
 - [ ] The browser client still targets fake-settlement tables. With the
