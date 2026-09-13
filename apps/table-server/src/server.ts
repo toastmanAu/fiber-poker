@@ -31,7 +31,7 @@ import {
   verifyEnvelopeSignature,
   type SeatStatus,
 } from "@fiber-poker/protocol";
-import { FakeSettlementAdapter, ImmediateFiberSettlement, type SettlementAdapter } from "@fiber-poker/settlement";
+import { FakeSettlementAdapter, HoldInvoiceSettlement, ImmediateFiberSettlement, type SettlementAdapter } from "@fiber-poker/settlement";
 import type { FiberGateway } from "@fiber-poker/fiber-adapter";
 import { ChannelManager, type SeatLifecycle } from "./channels.ts";
 import { SettlementCoordinator } from "./coordinator.ts";
@@ -157,9 +157,13 @@ export class TableServer {
       holdMode: this.adapter.constructor.name === "HoldInvoiceSettlement",
       awaitTimeoutMs: this.config.settlementTimeoutMs,
     });
-    // Adapter-level peer resolution (ImmediateFiberSettlement payouts):
-    // bind to the live map so declared peers apply to payouts too.
-    if (this.adapter instanceof ImmediateFiberSettlement) {
+    // Adapter-level peer resolution (payout legs): bind to the live map so
+    // declared peers apply to payouts too. Both fiber adapters expose a
+    // mutable resolvePeer (docs/15: session key != fiber node key).
+    if (
+      this.adapter instanceof ImmediateFiberSettlement ||
+      this.adapter instanceof HoldInvoiceSettlement
+    ) {
       this.adapter.resolvePeer = (playerId: string) => this.peerMap.get(playerId) ?? playerId;
     }
     this.coordinator.setTableId(this.config.tableId);
@@ -800,8 +804,29 @@ export class TableServer {
   /** Membership queue: queued joins apply first, then top-ups, then leave payouts. */
   private async processMembershipQueues(): Promise<void> {
     for (const pending of [...this.joinQueue]) {
-      await this.seatPlayer(pending.playerId, pending.seat, pending.buyIn, pending.channelId);
       this.joinQueue = this.joinQueue.filter((j) => j.playerId !== pending.playerId);
+      // The seat was chosen against a mid-hand snapshot that did not yet
+      // include the other QUEUED joins — several pending joins can collide
+      // on the same seat number. Re-check against the CURRENT state and
+      // fall back to any open seat before committing.
+      const taken = new Set(
+        this.runtime.state.seats.filter((s) => s.playerId !== null).map((s) => s.seat),
+      );
+      let seat = pending.seat;
+      if (taken.has(seat)) {
+        seat = -1;
+        for (let i = 0; i < this.runtime.state.seats.length; i++) {
+          if (!taken.has(i)) {
+            seat = i;
+            break;
+          }
+        }
+      }
+      if (seat < 0) {
+        this.notify(pending.playerId, { type: "ERROR", payload: { code: "TABLE_FULL", detail: "no open seat at seat time" } });
+        continue;
+      }
+      await this.seatPlayer(pending.playerId, seat, pending.buyIn, pending.channelId);
     }
     await this.processTopUpQueue();
     await this.processLeaveQueue();

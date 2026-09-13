@@ -155,6 +155,25 @@ export class SettlementCoordinator {
         ? await this.awaitHeldOrTerminal(ref)
         : await this.awaitTerminal(ref);
       if (status === "HELD") {
+        if (obligation.handId === "") {
+          // Non-hand obligations (buy-in, top-up) are not refundable through
+          // the hand-abort policy, so holding them would lock the funds at
+          // `Received` forever (rc7: Received is a LOCK, not a transfer —
+          // the sim moves balances eagerly and hides this). Settle the hold
+          // immediately; the commit may proceed as if immediate.
+          await this.adapter.finalize?.(ref, undefined);
+          await this.events.append({
+            tableId: obligation.tableId,
+            handId: obligation.handId || null,
+            sequence: obligation.sequence,
+            eventType: obligation.direction === "PLAYER_TO_TABLE" ? "PaymentSucceeded" : "PayoutSucceeded",
+            createdAt: new Date().toISOString(),
+            payload: { obligationId: obligation.obligationId, attempt, status: "HELD+FINALIZED" },
+            fiberRef: ref.id,
+          });
+          this.inflight.delete(obligation.obligationId);
+          return "SETTLED";
+        }
         // Hold mode: liquidity is locked; the action may commit. Release or
         // cancel happens under the hand-completion policy.
         this.heldByHand.set(obligation.handId, [

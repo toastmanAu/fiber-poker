@@ -46,12 +46,18 @@ export class HoldInvoiceSettlement implements SettlementAdapter {
   private byObligation = new Map<string, HeldEntry>();
   private paymentHandlers = new Set<(req: PaymentRequest) => void>();
   private pollMs: number;
+  /** Poker session key -> Fiber node pubkey (docs/15). PAYOUTS are keysend
+   *  payments to the FIBER PEER — paying the raw session key asks fnn for a
+   *  path to a node that does not exist ("no path found"). Mutable: the
+   *  table server binds this to its live peer registry. */
+  resolvePeer: (playerId: string) => string;
 
-  constructor(private readonly gateway: FiberGateway, opts?: { pollMs?: number }) {
+  constructor(private readonly gateway: FiberGateway, opts?: { pollMs?: number; resolvePeer?: (playerId: string) => string }) {
     if (!gateway.createHoldInvoice || !gateway.settleInvoice || !gateway.cancelInvoice) {
       throw new Error("HoldInvoiceSettlement requires a gateway with hold-invoice support");
     }
     this.pollMs = opts?.pollMs ?? 25;
+    this.resolvePeer = opts?.resolvePeer ?? ((id: string) => id);
   }
 
   onPaymentRequest(handler: (req: PaymentRequest) => void): void {
@@ -81,7 +87,7 @@ export class HoldInvoiceSettlement implements SettlementAdapter {
       };
       this.entries.set(ref.id, entry);
       this.byObligation.set(obligation.obligationId, entry);
-      const sent = await this.gateway.sendToPeer(obligation.playerId, BigInt(obligation.amountShannons));
+      const sent = await this.gateway.sendToPeer(this.resolvePeer(obligation.playerId), BigInt(obligation.amountShannons));
       entry.paymentHash = sent.paymentHash;
       void this.pollPayout(entry).catch(() => {
         entry.status = "FAILED";
@@ -90,11 +96,12 @@ export class HoldInvoiceSettlement implements SettlementAdapter {
       return ref;
     }
 
-    // PLAYER_TO_TABLE: create the hold invoice from the payee's preimage
-    // (rc7 hold form: preimage-only creation; the response carries the
-    // payment hash — it cannot be precomputed from the obligation).
+    // PLAYER_TO_TABLE: create the TRUE rc7 hold invoice from payment_hash
+    // only (hash derived from the payee's preimage inside the gateway); the
+    // response carries the payment hash and the invoice ADDRESS the payer
+    // needs for send_payment.
     const preimage = holdPreimageFor(obligation);
-    const { paymentHash } = await this.gateway.createHoldInvoice!(BigInt(obligation.amountShannons), preimage);
+    const { paymentHash, invoiceAddress } = await this.gateway.createHoldInvoice!(BigInt(obligation.amountShannons), preimage);
     const entry: HeldEntry = {
       ref,
       obligation,
@@ -106,7 +113,9 @@ export class HoldInvoiceSettlement implements SettlementAdapter {
     this.entries.set(ref.id, entry);
     this.byObligation.set(obligation.obligationId, entry);
 
-    const req: PaymentRequest = { ref, obligation, paymentHash };
+    // invoiceAddress MUST travel to the payer: the rc7 payer flow pays the
+    // ADDRESS (player agent pays PAYMENT_REQUIRED.invoiceAddress).
+    const req: PaymentRequest = { ref, obligation, paymentHash, invoiceAddress };
     for (const handler of this.paymentHandlers) handler(req);
 
     void this.pollHold(entry).catch(() => {
@@ -164,7 +173,26 @@ export class HoldInvoiceSettlement implements SettlementAdapter {
     if (entry.status === "SUCCEEDED") return;
     if (entry.status !== "HELD") throw new Error(`finalize: ref ${ref.id} is ${entry.status}, not HELD`);
     await this.gateway.settleInvoice!(entry.paymentHash, entry.preimage);
-    entry.status = "SUCCEEDED";
+    // rc7 (live-verified): settle_invoice is accepted synchronously but the
+    // funds credit the channel ASYNCHRONOUSLY (invoice flips Received ->
+    // Paid within ~3-9 s). Payouts must not race that credit — the
+    // hold-mode invariant is "the pot's chips genuinely reached the table
+    // before payouts flow" — so wait for Paid.
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      const status = await this.gateway.invoiceStatus(entry.paymentHash);
+      if (status === "Paid") {
+        entry.status = "SUCCEEDED";
+        return;
+      }
+      if (status === "Cancelled" || status === "Expired") {
+        throw new Error(`finalize: settled invoice went ${status}`);
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`finalize: invoice not Paid within 30s (status ${status})`);
+      }
+      await new Promise((r) => setTimeout(r, Math.max(this.pollMs, 250)));
+    }
   }
 
   /** Cancel a held/open obligation (abort policy): funds return to the payer. */
@@ -172,13 +200,18 @@ export class HoldInvoiceSettlement implements SettlementAdapter {
     const entry = this.entries.get(ref.id);
     if (!entry) return;
     if (entry.status === "SUCCEEDED") return; // already settled: cannot cancel
-    try {
-      await this.gateway.cancelInvoice!(entry.paymentHash);
-      entry.status = "CANCELLED";
-      entry.error = reason;
-    } catch (e) {
-      entry.error = `cancel failed: ${String(e)}`;
+    // Only PLAYER_TO_TABLE holds are invoices; payout legs are keysend
+    // payments with nothing to cancel on the node — they are simply
+    // abandoned (the coordinator retries with a fresh attempt).
+    if (entry.obligation.direction === "PLAYER_TO_TABLE") {
+      try {
+        await this.gateway.cancelInvoice!(entry.paymentHash);
+      } catch (e) {
+        entry.error = `cancel failed: ${String(e)}`;
+      }
     }
+    entry.status = "CANCELLED";
+    entry.error = entry.error ?? reason;
   }
 
   /** Terminal states for the coordinator. */
@@ -199,5 +232,17 @@ export class HoldInvoiceSettlement implements SettlementAdapter {
 
   entryFor(obligationId: string): HeldEntry | undefined {
     return this.byObligation.get(obligationId);
+  }
+
+  /** Diagnostics: every hold/payout this adapter has tracked. */
+  allEntries(): { ref: string; obligationId: string; direction: string; amount: string; status: SettlementStatus; error?: string }[] {
+    return [...this.entries.values()].map((e) => ({
+      ref: e.ref.id,
+      obligationId: e.obligation.obligationId,
+      direction: e.obligation.direction,
+      amount: e.obligation.amountShannons,
+      status: e.status,
+      error: e.error,
+    }));
   }
 }

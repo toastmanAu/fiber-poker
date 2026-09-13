@@ -37,7 +37,7 @@ export interface FiberGateway {
   /** Hold invoice: created from the payee's preimage; payer funds lock at
    *  "Received" until settled. The response hash is authoritative (it is
    *  derived by the node, not precomputable from the obligation). */
-  createHoldInvoice?(amount: bigint, preimage: string): Promise<{ paymentHash: string }>;
+  createHoldInvoice?(amount: bigint, preimage: string): Promise<{ paymentHash: string; invoiceAddress?: string }>;
   /** Payee settles a held invoice by revealing the preimage. */
   settleInvoice?(paymentHash: string, preimage: string): Promise<void>;
   /** Payee cancels a held/open invoice; payer funds are released. */

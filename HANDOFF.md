@@ -22,8 +22,10 @@ the project stands, how to reach the live test environment, and what remains.
 | **Live testnet validation** | ✅ real money moved on `fnn 0.9.0-rc7` (details §3) |
 | **Player agent** | ✅ `apps/player-agent`, live-verified (details §3) |
 | **Multi-hand live session** | ✅ top-up + dual cash-out live (details §3.6) |
+| **Six-agent live demo** | ✅ full table behind one player node, live (details §3.7) |
+| **Hold-mode live session** | ✅ hold-at-bet → settle-at-hand-end on rc7 (details §3.8) |
 
-Suite: **108 pass + 8 gated-skip (live tests run only with env vars)**.
+Suite: **109 pass + 10 gated-skip (live tests run only with env vars)**.
 Typecheck clean. Everything committed and pushed.
 
 Run everything from `~/fiber-poker/fiber-poker`:
@@ -144,32 +146,46 @@ All recorded in `docs/fnn-compat.md` ("VERIFIED AGAINST A LIVE NODE"):
    session with 15 real invoices settles in ~7s; `list_channels` order is
    not stable, so never assume "first ready channel" is stable across
    calls.
+8. **Six-agent live demo verified** (2026-09-11): six agents on one
+   shared channel (refcount 6), 2 hands, all cashed out, one cooperative
+   close — 39s live (`tests/fiber/live-sixagent.test.ts`). It exposed a
+   real server bug: queued joins colliding on one seat number (fixed:
+   seats re-checked at seat-time with a free-seat fallback).
+9. **Hold-mode live session verified** (2026-09-11): TRUE rc7 holds
+   (payment_hash-only invoices, hash = ckb-blake2b of the table's
+   preimage) park at `Received`; bets commit on HELD;
+   `settle_invoice` at hand end (async Paid ~3-9s — `finalize` waits for
+   Paid before payouts); buy-ins/top-ups finalize immediately (never
+   registered as hand-held). Two simulator-invisible bugs fixed:
+   PaymentRequest must carry `invoiceAddress` (the agent pays the
+   ADDRESS), and hold payouts must use `resolvePeer` — paying the raw
+   session key gives `PathFind error: no path found`. Full recipe:
+   `docs/fnn-compat.md` → "Hold-mode live session findings".
 
 ---
 
 ## 4. Remaining work (prioritized)
 
-### P1 — finish the live 2-player table story
-- [x] **Multi-hand session on live nodes** (DONE 2026-09-11, commit
-      15dad8e): `tests/fiber/live-multihand.test.ts` plays THREE chained
-      hands, tops up the losing seat 5 CKB between hands (queued mid-hand,
-      drained between hands), then cashes out BOTH seats: payout →
-      cooperative `shutdown_channel` → seat removed. Passed live.
-      Along the way it exposed and fixed the rc7 keysend payout bug (§3.6)
-      and the shared-channel close race (ChannelManager now refcounts
-      channels; close fires only on the last seat).
-- [ ] **6-agent live demo**: scale the 2-agent harness to 6 seats (the
-      shared-player-node trick means only ONE fiber node is needed as the
-      backing for all 6 — the ChannelManager refcount makes shared-channel
-      leaves safe now). Watch side pots + odd chips with real money.
-      Rehearsal pattern: `tests/fiber/multihand-session.test.ts` runs the
-      exact live topology on the simulator (PlayerAgent gateway injection).
-- [ ] **Hold-mode live test** (P9): the hold invoice primitives are
-      live-verified; run `HoldInvoiceSettlement` table server against the
-      real nodes (set `FIBER_POKER_SETTLEMENT=hold`) and verify
-      hold-at-bet → settle-at-hand-end over the wire. NOTE: hold.ts payout
-      path was fixed together with the keysend finding — poll the response
-      hash.
+### P1 — finish the live 2-player table story — ✅ ALL DONE (2026-09-11)
+- [x] **Multi-hand session on live nodes** (commit 15dad8e):
+      `tests/fiber/live-multihand.test.ts` — THREE chained hands, losing
+      seat tops up 5 CKB between hands, both seats cash out. Passed live.
+      Exposed + fixed the rc7 keysend payout bug (§3.6) and the
+      shared-channel close race (ChannelManager refcounts; close fires on
+      the last seat only).
+- [x] **6-agent live demo** (commit this session):
+      `tests/fiber/live-sixagent.test.ts` — six agents, one shared
+      channel, 2 hands, all cashed out, one close. Passed live in 39s.
+      Caught + fixed the queued-join seat-collision bug in
+      `processMembershipQueues`. Rehearsal: `tests/fiber/six-agent-session.test.ts`.
+      Side pots/odd chips remain covered by engine unit tests (call-station
+      agents don't raise, so live all-in side pots don't arise naturally).
+- [x] **Hold-mode live test** (commit this session):
+      `tests/fiber/live-hold.test.ts` — TRUE rc7 holds end to end: bets
+      commit on HELD (`Received`), `settle_invoice` at hand end, keysend
+      payouts, cash-out + close. Passed live in 8.5s. Recipe + the two
+      simulator-invisible integration fixes are in
+      `docs/fnn-compat.md` → "Hold-mode live session findings".
 
 ### P2 — channel opening robustness
 - [ ] Wire `classifyFundingAmount()` (scaffolded in the other agent's

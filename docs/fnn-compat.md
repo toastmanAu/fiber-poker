@@ -552,10 +552,23 @@ The correct payee-side flows (both verified live):
    knows the preimage, so fnn auto-settles on TLC arrival: payer `Success`,
    payee invoice `Paid`, channel balances move. VERIFIED LIVE: 1 CKB moved
    table-ward over the real channel.
-2. **Hold**: same preimage-only creation; the payee simply delays
-   `settle_invoice` to hold funds. (The explicit settle_invoice call was
-   not needed live — fnn auto-settled; the settle_invoice params shape on
-   rc7 remains unverified and errored with a vector-conversion message.)
+2. **Hold**: create the invoice from `payment_hash` ONLY —
+   `payment_hash = blake2b-256(preimage_bytes)` with the CKB personalization
+   (`ckb-default-hash`; live-verified identical to our `ckbHash`). The
+   payer's TLC then parks the invoice at `Received` (payer `Inflight`) —
+   funds LOCKED, not final; fnn does NOT auto-settle this form. At hand end
+   the payee reveals the preimage: `settle_invoice { payment_hash,
+   payment_preimage: "0x<64 hex>" }` returns `{}` immediately and the
+   invoice flips `Received -> Paid` (payer `Success`) ASYNCHRONOUSLY,
+   observed within ~3-9 s; the channel balance credit lands on the same
+   async path. VERIFIED LIVE END-TO-END 2026-09-11 (probe + the live
+   hold-mode session in `tests/fiber/live-hold.test.ts`).
+   The earlier "hash-only can never be settled" finding stands ONLY for
+   the case where the payee does not know the preimage — hash-only is the
+   settle_invoice-capable HOLD form when the hash was derived from the
+   payee's own preimage. (An early probe error, "vector conversion", was
+   the preimage being double-encoded; send a plain `0x`-prefixed hex
+   vector.)
 
 Consequence for this codebase: `ImmediateFiberSettlement` now creates
 preimage-based invoices (rc7 flow) — the correlation hash of the original
@@ -626,3 +639,29 @@ Fixes shipped with this finding:
   recorded `PaymentFailed` attempt (with retries) instead of letting them
   break the caller — a settlement failure now fail-stops COHERENTLY via
   `LiquidityManager.pause` rather than stranding the phase.
+
+### Hold-mode live session findings (2026-09-11, P1/P9 closed)
+
+With the hold recipe above wired into `HoldInvoiceSettlement` + the real
+gateway, a full hold-mode table session ran live (2 agents, 2 hands:
+bets commit on HELD, `settle_invoice` at hand end, keysend payouts,
+cooperative channel close). Two integration gaps surfaced that the
+simulator structurally could NOT catch — both fixed:
+
+1. **`PaymentRequest` must carry `invoiceAddress`.** The hold adapter
+   emitted only `paymentHash`; the player agent pays `PAYMENT_REQUIRED.
+   invoiceAddress` (the rc7 payer flow) and silently ignored the request.
+   The sim e2e never noticed because its auto-pay hook paid by hash
+   directly. Rule: any payer-facing request needs the ADDRESS, any polling
+   correlation needs the RESPONSE hash.
+2. **Payouts must go to the resolved FIBER PEER, not the session key.**
+   `HoldInvoiceSettlement` paid `obligation.playerId` (the poker session
+   pubkey) — fnn answers `PathFind error: no path found` because no NODE
+   exists at that key. `ImmediateFiberSettlement` already had
+   `resolvePeer` (docs/15: session key != fiber node key); the hold
+   adapter now has it too and the table server binds it for both. The sim
+   hold e2e masked this because there session keys ARE node keys.
+
+Also note: the settle credit is asynchronous relative to `settle_invoice`
+acceptance, so `finalize` now waits for the invoice to reach `Paid`
+before reporting success — payouts must never race the credit.

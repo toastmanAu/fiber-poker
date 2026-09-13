@@ -14,7 +14,6 @@ function random32Hex(): string {
   crypto.getRandomValues(b);
   return toHex(b);
 }
-void ckbHash;
 import { FiberRpcClient, type FiberChannel } from "./rpc.ts";
 import type { FiberGateway, GatewayChannel } from "./gateway.ts";
 
@@ -146,25 +145,32 @@ export class RealFiberGateway implements FiberGateway {
   }
 
   /**
-   * Hold invoice: created with H(preimage) as its payment hash. Verify the
-   * settle/cancel semantics against the pinned FNN build on devnet before
-   * production use (docs/fnn-compat.md — settle_invoice / cancel_invoice).
-   */
-  /**
-   * Hold invoice: created from the payee's preimage (rc7 hold form).
-   * Payer funds lock at `Received`; settle with settleInvoice(preimage).
+   * TRUE rc7 hold form (live-verified 2026-09-11): create from
+   * `payment_hash` ONLY, where hash = CKB blake2b-256 of the preimage
+   * bytes. The payer's TLC then parks the invoice at `Received` (funds
+   * locked, NOT final) until settleInvoice reveals the preimage.
+   * A preimage-bearing creation would AUTO-SETTLE on TLC arrival — which
+   * is the immediate primitive, not a hold.
    */
   async createHoldInvoice(amount: bigint, preimage: string): Promise<{ paymentHash: string; invoiceAddress: string }> {
+    const hex = preimage.startsWith("0x") ? preimage.slice(2) : preimage;
+    const bytes = new Uint8Array(hex.length / 2);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    const paymentHash = `0x${toHex(ckbHash(bytes))}`;
     const inv = await this.rpc.newInvoice({
       amount,
       currency: this.opts.currency ?? "Fibt",
-      payment_preimage: preimage.startsWith("0x") ? preimage : `0x${preimage}`,
+      payment_hash: paymentHash,
     });
     return { paymentHash: inv.invoice.data.payment_hash, invoiceAddress: inv.invoice_address };
   }
 
   async settleInvoice(paymentHash: string, preimage: string): Promise<void> {
-    await this.rpc.settleInvoice({ payment_hash: paymentHash, payment_preimage: `0x${Buffer.from(preimage).toString("hex")}` });
+    // Wire shape live-verified 2026-09-11: `0x`-prefixed hex vector of the
+    // preimage bytes; the settle is accepted synchronously and the invoice
+    // flips `Received -> Paid` asynchronously (observed within ~3-9 s).
+    const hex = preimage.startsWith("0x") ? preimage : `0x${preimage}`;
+    await this.rpc.settleInvoice({ payment_hash: paymentHash, payment_preimage: hex });
   }
 
   async cancelInvoice(paymentHash: string): Promise<void> {
