@@ -17,6 +17,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { afterAll, describe, expect, it } from "vitest";
 import { generateKeyPair } from "@fiber-poker/protocol";
 import { RealFiberGateway } from "@fiber-poker/fiber-adapter";
+import { ensureSessionCapacity } from "./helpers/live-topology.ts";
 import { ImmediateFiberSettlement } from "@fiber-poker/settlement";
 import { TableServer } from "@fiber-poker/table-server";
 import { InMemoryEventStore, InMemorySnapshotStore } from "@fiber-poker/persistence";
@@ -53,6 +54,12 @@ d("live six-agent demo (full table behind one player node)", () => {
     tableGateway = new RealFiberGateway({ url: TABLE_URL!, authToken: TABLE_TOKEN!, currency: "Fibt" });
     const playerGateway = new RealFiberGateway({ url: PLAYER_URL!, authToken: PLAYER_TOKEN!, currency: "Fibt" });
     const playerPeer = await playerGateway.nodePubkey();
+  await ensureSessionCapacity(tableGateway, playerGateway, {
+    minPlayerSide: 3n * BUY_IN,
+      minTableSide: 8n * BUY_IN,
+    openFunding: 200n * K,
+  });
+
 
     const peerMapJson: Record<string, string> = {};
     const keyDir = `.data/live-six-${Math.random().toString(36).slice(2)}`;

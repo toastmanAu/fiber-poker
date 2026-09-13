@@ -135,6 +135,9 @@ export class SettlementCoordinator {
         continue;
       }
       // Idempotent adapters return the original ref; record the correlation.
+      // Persisting the node-side payment hash HERE is what makes recovery
+      // able to ask the Fiber node what actually happened after a crash
+      // (a fresh process has no in-memory entries to consult).
       await this.events.append({
         tableId: obligation.tableId,
         handId: obligation.handId || null,
@@ -146,6 +149,7 @@ export class SettlementCoordinator {
           attempt,
           direction: obligation.direction,
           amountShannons: obligation.amountShannons,
+          paymentHash: this.adapter.paymentHashFor?.(ref),
         },
         fiberRef: ref.id,
       });

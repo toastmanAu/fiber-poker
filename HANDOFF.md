@@ -217,14 +217,39 @@ All recorded in `docs/fnn-compat.md` ("VERIFIED AGAINST A LIVE NODE"):
 - [ ] Surface `PAYMENT_REQUIRED`/`PAYMENT_STATUS` transitions distinctly
       in the status chips (design exists in `main.ts`, verify end-to-end).
 
-### P4 — persistence hardening on real nodes
-- [ ] The live suites use InMemory event stores. One full server-restart
-      cycle with `FileEventStore` against the REAL nodes (crash mid-hand,
-      restart, reconcile non-final invoices by obligationId) would close
-      the last gap vs the chaos suite's fake-adapter coverage.
-- [ ] Reconcile abandoned-channel ghosts: fnn has no cleanup RPC (source
-      comment admits it); decide whether to filter `only_pending` listing
-      older than N hours in the gateway.
+### P4 — persistence hardening on real nodes — ✅ core done (2026-09-11)
+- [x] **Crash/restart cycle with `FileEventStore` against the REAL nodes**
+      (`tests/fiber/live-restart.test.ts`, passed live): hard-kill mid-hand
+      → restart → hash chain intact, seats/stacks restored, blinds already
+      settled are NOT re-judged as failures (recovery skips obligations
+      with a recorded terminal outcome), hand resolves via the restored
+      turn timer, cash-out + one cooperative close. Enabling fixes:
+      - the node-side **payment hash is now PERSISTED** in
+        Payment/PayoutInflight events (`adapter.paymentHashFor`) — a fresh
+        process could otherwise never ask the node what happened;
+      - recovery resolves non-final ops **against the gateway**
+        (invoiceStatus/paymentStatus); a paid-but-uncommitted collection is
+        refunded immediately over the channel (keysend) and logged;
+      - **recovery restores the session→channel map** from ChannelReady
+        events — without it a restarted server pays out leaves but never
+        closes the real channel (silently);
+      - a failed cooperative close no longer eats the leave (logged,
+        CHANNEL_STATUS CLOSE_FAILED, seat stays gone).
+- [x] Ghost strategy: `abandon_channel` only for recent NegotiatingFunding
+      stalls (the open-poll targets the newest pending channel under 10
+      min old); Closed pending-list corpses are terminal, cannot be
+      abandoned, and stay cosmetic.
+- [ ] Optional still: filter ancient corpses out of `only_pending`
+      listings at the gateway (cosmetic; nothing reads them anymore).
+
+**Live-topology deployment note (learned the hard way):** rc7 has no
+post-open funding RPC, and the acceptor contributes ZERO collateral on
+this testnet — so a table-funded channel has no player-side capacity
+(player payments stick at Open) and a player-funded one has no table-side
+capacity (the liquidity gate refuses joins). Sessions need BOTH
+directions: `tests/fiber/helpers/live-topology.ts`
+(`ensureSessionCapacity`) opens compensating channels per direction; all
+four live session suites call it before joining.
 
 ### P5 — research tracks (documented, no code owed)
 - [ ] P11: benchmark `geometryxyz/mental-poker` on mobile; swap the toy

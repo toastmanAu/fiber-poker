@@ -36,6 +36,7 @@ export const EVENT_TYPES = [
   "PotAwarded",
   "PayoutInflight",
   "PayoutSucceeded",
+  "PayoutFailed",
   "HandCompleted",
   "HandAborted",
   "TurnTimerStarted",

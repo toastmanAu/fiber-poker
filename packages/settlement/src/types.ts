@@ -86,6 +86,14 @@ export interface SettlementAdapter {
   onPaymentRequest(handler: (req: PaymentRequest) => void): void;
   finalize?(ref: SettlementRef, resolution: unknown): Promise<void>;
   cancel?(ref: SettlementRef, reason: string): Promise<void>;
+  /**
+   * The node-side correlation handle (payment hash) for a ref, so the hash
+   * can be PERSISTED at inflight time. Recovery on a fresh process cannot
+   * ask an in-memory map — it must ask the Fiber node via this hash
+   * (docs/06: durable correlation (tableId, handId, obligationId) <->
+   * paymentHash lives in the event log).
+   */
+  paymentHashFor?(ref: SettlementRef): string | undefined;
 }
 
 /** Deterministic correlation: obligation id -> payment hash. */

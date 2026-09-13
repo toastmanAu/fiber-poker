@@ -8,6 +8,7 @@
  */
 
 import type { EventStore, SnapshotStore } from "@fiber-poker/persistence";
+import type { FiberGateway } from "@fiber-poker/fiber-adapter";
 import type { TableRuntime } from "./runtime.ts";
 import type { ChainTip } from "./runtime.ts";
 import type { SettlementCoordinator } from "./coordinator.ts";
@@ -28,6 +29,14 @@ export class RecoveryManager {
     private readonly events: EventStore,
     private readonly snapshots: SnapshotStore,
     private readonly coordinator: SettlementCoordinator | null,
+    /**
+     * Live reconciliation: a gateway-backed server passes its gateway so
+     * non-final Fiber ops can be resolved against the NODE (the fresh
+     * process has no in-memory adapter entries). Null (fake mode) keeps
+     * the legacy in-process reconcile path.
+     */
+    private readonly gateway: FiberGateway | null = null,
+    private readonly resolvePeer: (playerId: string) => string = (id) => id,
   ) {}
 
   /**
@@ -38,6 +47,7 @@ export class RecoveryManager {
     runtime: TableRuntime,
     tableConfig: TableConfig,
     restoreTimer: (payload: { handId: string; sequence: string; actingSeat: number; deadlineUnixMs: number }) => void,
+    restoreChannel?: (playerId: string, channelId: string) => void,
   ): Promise<RecoveryResult> {
     const snapshot = await this.snapshots.loadLatest();
     let fromEventId: string | undefined;
@@ -54,6 +64,24 @@ export class RecoveryManager {
     let reconciled = 0;
     let timersRestored = 0;
     const timerStarts = new Map<string, { handId: string; sequence: string; actingSeat: number; deadlineUnixMs: number }>();
+    /** Latest session->channel mapping per player (from ChannelReady events). */
+    const channelByPlayer = new Map<string, string>();
+
+    // Pass 1: which obligations already reached a recorded terminal outcome?
+    // A PaymentInflight whose PaymentSucceeded/PaymentFailed is ALSO in the
+    // log is history to replay, not an operation to reconcile.
+    const finalized = new Set<string>();
+    for (const event of all) {
+      if (
+        event.eventType === "PaymentSucceeded" ||
+        event.eventType === "PaymentFailed" ||
+        event.eventType === "PayoutSucceeded" ||
+        event.eventType === "PayoutFailed"
+      ) {
+        const id = (event.payload as { obligationId?: string }).obligationId;
+        if (id) finalized.add(id);
+      }
+    }
 
     for (const event of all) {
       replayed += 1;
@@ -67,30 +95,34 @@ export class RecoveryManager {
         }
         case "PaymentInflight":
         case "PayoutInflight": {
-          // Non-final Fiber operation: ask the adapter what actually happened.
-          // The obligation was persisted at SettlementPlanned; recovery looks
-          // it up by fiberRef and resolves exactly once.
-          if (this.coordinator) {
-            const planned = await this.findPlannedObligation(
-              event.fiberRef ?? ((event.payload.fiberRef as string | undefined) ?? ""),
-            );
-            if (planned) {
-              const outcome = await this.coordinator.reconcile(planned.obligation, {
-                adapter: "unknown",
-                id: event.fiberRef ?? "",
-              });
-              await this.events.append({
-                tableId: event.tableId,
-                handId: event.handId ?? null,
-                sequence: event.sequence ?? null,
-                eventType: outcome === "SETTLED" ? "PaymentSucceeded" : "PaymentFailed",
-                createdAt: new Date().toISOString(),
-                payload: { recovery: true, obligationId: planned.obligation.obligationId },
-                fiberRef: event.fiberRef ?? null,
-              });
-              reconciled += 1;
-            }
+          // Non-final Fiber operation: ask what actually happened. With a
+          // gateway (live mode) the NODE is the source of truth via the
+          // persisted payment hash; without one (fake mode) the shared
+          // in-process adapter is.
+          const p = event.payload as { obligationId?: string; paymentHash?: string; direction?: string };
+          if (p.obligationId && finalized.has(p.obligationId)) break; // already final
+          const planned = await this.findPlannedObligation(
+            event.fiberRef ?? ((event.payload.fiberRef as string | undefined) ?? ""),
+          );
+          if (!planned) break;
+          if (this.gateway && p.paymentHash) {
+            await this.reconcileAgainstNode(event, planned.obligation, p);
+          } else if (this.coordinator) {
+            const outcome = await this.coordinator.reconcile(planned.obligation, {
+              adapter: "unknown",
+              id: event.fiberRef ?? "",
+            });
+            await this.events.append({
+              tableId: event.tableId,
+              handId: event.handId ?? null,
+              sequence: event.sequence ?? null,
+              eventType: outcome === "SETTLED" ? "PaymentSucceeded" : "PaymentFailed",
+              createdAt: new Date().toISOString(),
+              payload: { recovery: true, obligationId: planned.obligation.obligationId },
+              fiberRef: event.fiberRef ?? null,
+            });
           }
+          reconciled += 1;
           break;
         }
         case "TurnTimerStarted": {
@@ -103,6 +135,11 @@ export class RecoveryManager {
           timerStarts.delete(`${p.handId}:${p.sequence}`);
           break;
         }
+        case "ChannelReady": {
+          const p = event.payload as { playerId?: string; channelId?: string };
+          if (p.playerId && p.channelId) channelByPlayer.set(p.playerId, p.channelId);
+          break;
+        }
         default:
           break;
       }
@@ -113,6 +150,17 @@ export class RecoveryManager {
       if (runtime.state.actingSeat === t.actingSeat && runtime.state.handId === t.handId) {
         restoreTimer(t);
         timersRestored += 1;
+      }
+    }
+
+    // Re-arm the channel bookkeeping for everyone still seated: without it
+    // the restarted server pays out leaves but never closes the real
+    // channel (empty session->channel map).
+    if (restoreChannel) {
+      for (const seat of runtime.state.seats) {
+        if (!seat.playerId) continue;
+        const channelId = channelByPlayer.get(seat.playerId);
+        if (channelId) restoreChannel(seat.playerId, channelId);
       }
     }
 
@@ -134,6 +182,70 @@ export class RecoveryManager {
       timersRestored,
       stateHash: runtime.tip.stateHash,
     };
+  }
+
+  /**
+   * Resolve one non-final operation against the live Fiber node and record
+   * the outcome as durable evidence. Player-protection policy: money that
+   * REACHED the table for an action that never committed is refunded
+   * immediately over the channel (keysend) and logged.
+   */
+  private async reconcileAgainstNode(
+    event: import("@fiber-poker/persistence").PokerEvent,
+    obligation: import("@fiber-poker/settlement").Obligation,
+    payload: { obligationId?: string; paymentHash?: string; direction?: string },
+  ): Promise<void> {
+    const hash = payload.paymentHash!;
+    const playerToTable = (payload.direction ?? obligation.direction) === "PLAYER_TO_TABLE";
+    let settled: boolean;
+    let note = "";
+    try {
+      if (playerToTable) {
+        const status = await this.gateway!.invoiceStatus(hash);
+        if (status === "Paid") {
+          // Collected but never committed: refund before anything else.
+          try {
+            const refund = await this.gateway!.sendToPeer(
+              this.resolvePeer(obligation.playerId),
+              BigInt(obligation.amountShannons),
+            );
+            note = `refunded-on-recovery:${refund.paymentHash.slice(0, 14)}…`;
+          } catch (e) {
+            note = `REFUND_FAILED:${String(e)}`;
+          }
+          settled = false;
+        } else if (status === "Received") {
+          // Locked but not final: cancel returns the funds to the player.
+          await this.gateway!.cancelInvoice?.(hash);
+          note = "cancelled-on-recovery:was-held";
+          settled = false;
+        } else {
+          // Open (never paid), Cancelled, Expired, Unknown: nothing to make
+          // right — the action simply never committed.
+          if (status === "Open") await this.gateway!.cancelInvoice?.(hash);
+          settled = false;
+          note = `invoice:${status}`;
+        }
+      } else {
+        const status = await this.gateway!.paymentStatus(hash);
+        settled = status === "Success";
+        note = `payout:${status}`;
+      }
+    } catch (e) {
+      settled = false;
+      note = `probe-failed:${String(e)}`;
+    }
+    await this.events.append({
+      tableId: event.tableId,
+      handId: event.handId ?? null,
+      sequence: event.sequence ?? null,
+      eventType: settled
+        ? (playerToTable ? "PaymentSucceeded" : "PayoutSucceeded")
+        : (playerToTable ? "PaymentFailed" : "PayoutFailed"),
+      createdAt: new Date().toISOString(),
+      payload: { recovery: true, obligationId: obligation.obligationId, paymentHash: hash, note },
+      fiberRef: event.fiberRef ?? null,
+    });
   }
 
   private async findPlannedObligation(

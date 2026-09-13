@@ -111,12 +111,20 @@ export class RealFiberGateway implements FiberGateway {
         // Stalled open (rc7 pins below-floor or underfunded-acceptor opens
         // in NegotiatingFunding forever, with no rejection): abandon the
         // ghost so nothing pins, then fail with a typed error the caller
-        // can retry on.
+        // can retry on. Only RECENT pending channels are candidates —
+        // ancient NegotiatingFunding ghosts from earlier sessions are
+        // inert residue, not ours to kill (created_at is 0x-hex millis).
+        const cutoff = Date.now() - 10 * 60_000;
         try {
           const pending = await this.rpc.listChannels({ only_pending: true });
-          const stuck = pending.channels.find(
-            (c) => c.pubkey === peerPubkey && c.state.state_name === "NegotiatingFunding",
-          );
+          const stuck = pending.channels
+            .filter(
+              (c) =>
+                c.pubkey === peerPubkey &&
+                c.state.state_name === "NegotiatingFunding" &&
+                Number.parseInt(c.created_at ?? "0x0", 16) >= cutoff,
+            )
+            .sort((a, b) => Number.parseInt(b.created_at ?? "0x0", 16) - Number.parseInt(a.created_at ?? "0x0", 16))[0];
           if (stuck) {
             await this.rpc.abandonChannel({ channel_id: stuck.channel_id }).catch(() => undefined);
             throw new ChannelOpenStalledError(peerPubkey, stuck.channel_id);

@@ -124,10 +124,24 @@ export class ChannelManager {
   }
 
   /**
+   * Re-register a seat's channel during crash recovery (the event log's
+   * ChannelReady events carry {playerId, channelId}). Without this, a
+   * restarted server pays out leaves but never closes the real channel —
+   * its channel map is empty and shutdownChannel becomes a no-op.
+   */
+  restore(playerId: string, channelId: string): void {
+    this.channels.set(playerId, channelId);
+    const users = this.channelUsers.get(channelId) ?? new Set<string>();
+    users.add(playerId);
+    this.channelUsers.set(channelId, users);
+    if (!this.lifecycle.has(playerId)) this.lifecycle.set(playerId, "CHANNEL_READY");
+  }
+
+  /**
    * Cooperative shutdown after final obligations (leave flow). With a shared
    * channel (several seats behind one fiber node) the last leaving seat is
-   * the one that actually closes the channel; earlier leaves only drop their
-   * seat's mapping so remaining seats keep their payout path.
+   * the one that actually closes the underlying channel; earlier leaves only
+   * drop their seat's mapping so remaining seats keep their payout path.
    */
   async shutdownChannel(playerPubkey: string): Promise<void> {
     this.setLifecycle(playerPubkey, "CLOSING");
@@ -139,7 +153,21 @@ export class ChannelManager {
       if (users.size === 0) this.channelUsers.delete(channelId!);
     }
     if (this.gateway && channelId && (!users || users.size === 0)) {
-      await this.gateway.shutdownChannel(channelId);
+      try {
+        await this.gateway.shutdownChannel(channelId);
+      } catch (e) {
+        // The seat's funds are already paid out — a failed cooperative
+        // close must not eat the leave (it previously killed the
+        // PLAYER_LEFT broadcast and left the close silently undone).
+        // Surface the failure; an operator can force-close later.
+        console.error(`[channels] cooperative shutdown of ${channelId.slice(0, 18)}… failed: ${String(e)}`);
+        this.notify(playerPubkey, {
+          type: "CHANNEL_STATUS",
+          payload: { channelId, state: "CLOSE_FAILED", error: String(e) },
+        });
+        this.lifecycle.delete(playerPubkey);
+        return;
+      }
     }
     this.lifecycle.delete(playerPubkey);
     this.notify(playerPubkey, {

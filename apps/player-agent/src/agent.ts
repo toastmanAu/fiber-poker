@@ -152,7 +152,10 @@ export class PlayerAgent {
     this.log(`top-up applied: ${amountShannons}`);
   }
 
-  private async connect(): Promise<void> {
+  /** Connect + authenticate WITHOUT joining. Public so crash-recovery
+   *  clients can reattach to an existing seat (join would be
+   *  ALREADY_SEATED). */
+  async connect(): Promise<void> {
     this.ws = new WebSocket(this.cfg.tableUrl);
     await new Promise<void>((resolve, reject) => {
       this.ws!.on("open", resolve);

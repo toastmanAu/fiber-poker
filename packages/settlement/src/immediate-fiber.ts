@@ -178,6 +178,10 @@ export class ImmediateFiberSettlement implements SettlementAdapter {
     return this.byObligation.get(obligationId);
   }
 
+  paymentHashFor(ref: SettlementRef): string | undefined {
+    return this.entries.get(ref.id)?.paymentHash;
+  }
+
   /** Diagnostics: every settlement attempt this adapter has tracked. */
   allEntries(): { ref: string; obligationId: string; direction: string; amount: string; status: SettlementStatus; error?: string }[] {
     return [...this.entries.values()].map((e) => ({

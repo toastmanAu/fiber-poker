@@ -212,7 +212,13 @@ export class TableServer {
     const genesis = genesisRuntime(this.config.tableId, this.tableConfig);
     this.runtime = new TableRuntime(this.events, keys.privateKey, keys.publicKey, genesis.state, genesis.tip);
 
-    const recovery = new RecoveryManager(this.events, this.snapshots, this.coordinator);
+    const recovery = new RecoveryManager(
+      this.events,
+      this.snapshots,
+      this.coordinator,
+      this.gateway,
+      this.resolvePeer,
+    );
     const result = await recovery.recover(this.runtime, this.tableConfig, (t) => {
       const remaining = t.deadlineUnixMs - Date.now();
       if (remaining > 0) {
@@ -220,7 +226,7 @@ export class TableServer {
       } else {
         void this.runExclusive(() => this.resolveTimeout(t.actingSeat));
       }
-    });
+    }, (playerId, channelId) => this.channels.restore(playerId, channelId));
     // Rebuild ack bookkeeping + last event id from the log.
     const allEvents = await this.events.readAll();
     for (const event of allEvents) {
