@@ -15,6 +15,7 @@ export interface TableServerConfig {
   /** Dev convenience: fake adapter auto-approves player payments. */
   autoPay: boolean;
   autoStartHands: boolean;
+  autoCapacity: boolean;
   turnTimeoutMs: number;
   smallBlind: bigint;
   bigBlind: bigint;
@@ -67,6 +68,10 @@ export function loadConfig(overrides: Partial<TableServerConfig> = {}): TableSer
     fnnToken: env("FIBER_POKER_FNN_TOKEN"),
     autoPay: envBool("FIBER_POKER_AUTO_PAY", true),
     autoStartHands: envBool("FIBER_POKER_AUTO_START_HANDS", true),
+    /** Fiber mode: auto-open a table-funded channel when a join's payout
+     *  capacity is short (player-side capacity is the player's own job —
+     *  the agent/companion provisions it). */
+    autoCapacity: envBool("FIBER_POKER_AUTO_CAPACITY", true),
     turnTimeoutMs: envInt("FIBER_POKER_TURN_TIMEOUT_MS", 30_000),
     smallBlind: BigInt(env("FIBER_POKER_SMALL_BLIND") ?? "100000000"), // 1 CKB
     bigBlind: BigInt(env("FIBER_POKER_BIG_BLIND") ?? "200000000"), // 2 CKB

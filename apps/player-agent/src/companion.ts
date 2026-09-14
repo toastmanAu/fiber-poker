@@ -3,7 +3,7 @@
  * One browser connection replaces a headless agent, not the table protocol.
  */
 import { WebSocket, WebSocketServer } from "ws";
-import type { FiberGateway } from "@fiber-poker/fiber-adapter";
+import { ensureCapacity, type FiberGateway } from "@fiber-poker/fiber-adapter";
 
 export interface CompanionConfig {
   tableUrl: string;
@@ -19,6 +19,9 @@ export class PlayerCompanion {
   private browser: WebSocket | null = null;
   private upstream: WebSocket | null = null;
   private peer = "";
+  /** The table's FIBER node pubkey (from the upstream WELCOME) — capacity
+   *  target for auto-provisioning when a payment would outrun the pool. */
+  private tableFiberPeer = "";
   private payments = new Map<string, Promise<void>>();
   private stopped = false;
   constructor(private readonly config: CompanionConfig) {}
@@ -110,6 +113,8 @@ export class PlayerCompanion {
           if (incoming.type === "WELCOME") {
             authenticated = true;
             clearTimeout(timer);
+            const fiberPeer = (incoming.payload as { fiberPeerPubkey?: string }).fiberPeerPubkey;
+            if (fiberPeer) this.tableFiberPeer = fiberPeer;
           }
           if (browser.readyState === WebSocket.OPEN)
             browser.send(raw.toString());
@@ -176,15 +181,38 @@ export class PlayerCompanion {
     });
     // Start after insertion so even synchronous gateway failures are retryable.
     const task = Promise.resolve().then(async () => {
-      try {
+      const amount = BigInt(String(payload.amountShannons ?? "0"));
+      const attempt = async (): Promise<void> => {
         if (!this.config.gateway.payInvoice)
           throw new Error("Invoice payment unavailable");
         await this.config.gateway.payInvoice(payload.invoiceAddress as string);
+      };
+      try {
+        await attempt();
         this.send(browser, "COMPANION_STATUS", {
           status: "PAYMENT_SUBMITTED",
           obligationId: id,
         });
-      } catch {
+      } catch (error) {
+        // Insufficient player-side capacity: provision toward the table and
+        // retry once before reporting failure (capacity.ts).
+        const insufficient = /insufficient/i.test(String(error));
+        if (insufficient && this.tableFiberPeer) {
+          try {
+            await ensureCapacity(this.config.gateway, this.tableFiberPeer, {
+              min: amount > 0n ? amount * 2n : 50n * 100_000_000n,
+              openFunding: 600n * 100_000_000n,
+            });
+            await attempt();
+            this.send(browser, "COMPANION_STATUS", {
+              status: "PAYMENT_SUBMITTED",
+              obligationId: id,
+            });
+            return;
+          } catch {
+            /* fall through to failure */
+          }
+        }
         this.send(browser, "COMPANION_STATUS", {
           status: "PAYMENT_FAILED",
           obligationId: id,

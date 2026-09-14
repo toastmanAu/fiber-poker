@@ -115,6 +115,13 @@ export class LiquidityManager {
     throw new Error("NOT_IMPLEMENTED: circular self-payment rebalancing is a future milestone (docs/04)");
   }
 
+  /** Structured view for auto-capacity provisioning (P3 polish). */
+  usableOutboundFor(playerId: string): { usableOutbound: bigint; peer: string } | undefined {
+    const lq = this.liquidity.get(playerId);
+    if (!lq) return undefined;
+    return { usableOutbound: lq.usableOutbound, peer: this.resolvePeer(playerId) };
+  }
+
   pause(reason: string): void {
     this.paused = true;
     this.pausedReason = reason;

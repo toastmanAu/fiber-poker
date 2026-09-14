@@ -91,6 +91,9 @@ export class TableServer {
   private joinQueue: { playerId: string; seat: number; buyIn: bigint; channelId: string }[] = [];
   private usedNonces = new Set<string>();
   private turnTimers = new Map<string, NodeJS.Timeout>();
+  /** Deadline of the currently armed turn so a reconnecting player can be
+   *  re-notified WITHOUT extending the timer (RESYNC replay, item 5). */
+  private currentTurnDeadline?: { key: string; deadlineUnixMs: number };
   private pendingPayments = new Map<string, { obligationIds: string[] }>();
   private reveals = new Map<string, unknown>();
   private commitCount = 0;
@@ -461,6 +464,11 @@ export class TableServer {
           tablePubkey: this.runtime.tablePublicKey,
           tableId: this.config.tableId,
           trustModel: "authoritative-but-auditable (not trustless)",
+          // The player side provisions its own channel capacity toward THIS
+          // peer (capacity.ts); the poker key alone is not routable.
+          ...(this.gateway
+            ? { fiberPeerPubkey: await this.gateway.nodePubkey().catch(() => undefined) }
+            : {}),
           devMode: {
             autoPay: this.config.autoPay,
             fakeSettlement: this.adapter instanceof FakeSettlementAdapter,
@@ -550,6 +558,45 @@ export class TableServer {
         fakeSettlement: this.adapter instanceof FakeSettlementAdapter,
       },
     }));
+    // A player resyncing mid-hand must not lose their private view: replay
+    // their hole cards and, if the acting seat is theirs, their turn (with
+    // the ORIGINAL deadline — resync never extends the timer).
+    const session = this.sessions.get(socket);
+    if (!session || this.recovering) return;
+    const full = this.runtime.state;
+    if (full.handId) {
+      const seat = full.seats.find((s) => s.playerId === session.playerId);
+      if (seat && seat.holeCards.length > 0) {
+        this.sendTo(socket, makeMessage("HOLE_CARDS", {
+          handId: full.handId,
+          cards: seat.holeCards,
+        }));
+      }
+    }
+    if (
+      full.handId &&
+      full.actingSeat !== undefined &&
+      (full.phase === "PREFLOP" || full.phase === "FLOP" || full.phase === "TURN" || full.phase === "RIVER")
+    ) {
+      const acting = full.seats[full.actingSeat]!;
+      if (acting.playerId === session.playerId) {
+        const key = `${full.handId}:${full.sequence}`;
+        const deadline =
+          this.currentTurnDeadline?.key === key
+            ? this.currentTurnDeadline.deadlineUnixMs
+            : Date.now() + this.config.turnTimeoutMs;
+        if (deadline > Date.now()) {
+          this.sendTo(socket, makeMessage("YOUR_TURN", {
+            payload: {
+              handId: full.handId,
+              deadlineUnixMs: deadline,
+              legal: this.engine.legalActions(full, session.playerId),
+              sequence: this.runtime.tip.sequence + 1n,
+            },
+          }));
+        }
+      }
+    }
   }
 
   acksFor(playerId: string): { sequence: string; stateHash: string; at: string } | undefined {
@@ -639,13 +686,48 @@ export class TableServer {
     // 3. Liquidity check: table must be able to pay this stack back out.
     this.channels.setLifecycle(playerId, "LIQUIDITY_CHECK");
     await this.liquidity.refresh([{ playerId }]);
-    const canPay = this.liquidity.canStartHand(new Map([[playerId, buyIn]]));
+    let canPay = this.liquidity.canStartHand(new Map([[playerId, buyIn]]));
+    if (!canPay.ok && this.gateway && this.config.autoCapacity) {
+      // Auto-provision table-side payout capacity (P3 polish): the join
+      // must not fail for a shortfall the table can fix with one funded
+      // channel open (player-side capacity is the player's own job).
+      const info = this.liquidity.usableOutboundFor(playerId);
+      const shortfall = info ? buyIn - info.usableOutbound : 0n;
+      if (info && shortfall > 0n) {
+        const funding = shortfall * 2n > this.config.channelFunding ? shortfall * 2n : this.config.channelFunding;
+        try {
+          await this.gateway.openChannel(info.peer, funding);
+          await this.liquidity.refresh([{ playerId }]);
+          canPay = this.liquidity.canStartHand(new Map([[playerId, buyIn]]));
+          await this.events.append({
+            tableId: this.config.tableId,
+            handId: null,
+            sequence: null,
+            eventType: "ChannelReady",
+            createdAt: new Date().toISOString(),
+            payload: { playerId, autoProvisioned: true, funding: funding.toString() },
+            fiberRef: null,
+          });
+        } catch (e) {
+          await this.events.append({
+            tableId: this.config.tableId,
+            handId: null,
+            sequence: null,
+            eventType: "PaymentFailed",
+            createdAt: new Date().toISOString(),
+            payload: { autoCapacity: true, playerId, error: String(e) },
+            fiberRef: null,
+          });
+        }
+      }
+    }
     if (!canPay.ok) {
       this.sendTo(socket, makeMessage("ERROR", { code: "INSUFFICIENT_TABLE_LIQUIDITY", detail: canPay.reason }));
       return;
     }
 
     // 4. Buy-in payment BEFORE seating (payment-before-commit).
+    const buyInObligationId = `buyin:${playerId.slice(0, 12)}:${Date.now()}-${++this.commitCount}`;
     const settled = await this.coordinator.fulfil(
       [
         {
@@ -653,12 +735,15 @@ export class TableServer {
           playerId,
           amount: buyIn,
           reason: "BET" as const,
-          obligationId: `buyin:${playerId.slice(0, 12)}:${Date.now()}-${++this.commitCount}`,
+          obligationId: buyInObligationId,
         },
       ],
       { handId: "", sequence: this.runtime.tip.sequence, actionHash: `buyin:${playerId.slice(0, 10)}` },
     );
     if (settled !== "SETTLED") {
+      // Player protection: the payment may have settled late (refund it)
+      // or be stuck Open (cancel it) — never strand the player's money.
+      await this.resolveAbandonedPayment(playerId, buyIn, buyInObligationId);
       this.sendTo(socket, makeMessage("ERROR", { code: "BUY_IN_FAILED", detail: "settlement failed" }));
       return;
     }
@@ -697,6 +782,59 @@ export class TableServer {
     this.broadcast(makeMessage("PLAYER_JOINED", { playerId, seat }));
     this.broadcastState(r.result);
     this.maybeSnapshot(r.result.eventId);
+  }
+
+  /**
+   * Player protection for a FAILED PLAYER_TO_TABLE settlement (P3 polish):
+   * ask the node what actually happened via the persisted payment hash.
+   * Paid (a late settle past our window) -> refund immediately over the
+   * channel; still Open/Received -> cancel so it can never be paid later.
+   */
+  private async resolveAbandonedPayment(playerId: string, amount: bigint, obligationId: string): Promise<void> {
+    if (!this.gateway) return;
+    const entry: { paymentHash?: string } | undefined =
+      this.adapter instanceof ImmediateFiberSettlement
+        ? this.adapter.entry(obligationId)
+        : this.adapter instanceof HoldInvoiceSettlement
+          ? this.adapter.entryFor(obligationId)
+          : undefined;
+    const hash = entry?.paymentHash;
+    if (!hash) return;
+    let note = "";
+    try {
+      const status = await this.gateway.invoiceStatus(hash);
+      if (status === "Paid") {
+        const refund = await this.gateway.sendToPeer(this.resolvePeer(playerId), amount);
+        note = `refunded-on-abandon:${refund.paymentHash.slice(0, 14)}…`;
+        await this.events.append({
+          tableId: this.config.tableId,
+          handId: null,
+          sequence: null,
+          eventType: "PayoutSucceeded",
+          createdAt: new Date().toISOString(),
+          payload: { obligationId, refundOnAbandon: true, paymentHash: hash, note },
+          fiberRef: null,
+        });
+        return;
+      }
+      if (status === "Open" || status === "Received") {
+        await this.gateway.cancelInvoice?.(hash);
+        note = `cancelled-on-abandon:was-${status}`;
+      } else {
+        note = `invoice:${status}`;
+      }
+    } catch (e) {
+      note = `resolve-failed:${String(e)}`;
+    }
+    await this.events.append({
+      tableId: this.config.tableId,
+      handId: null,
+      sequence: null,
+      eventType: "PaymentFailed",
+      createdAt: new Date().toISOString(),
+      payload: { obligationId, abandoned: true, paymentHash: hash, note },
+      fiberRef: null,
+    });
   }
 
   private async requestLeave(socket: WebSocket): Promise<void> {
@@ -755,6 +893,7 @@ export class TableServer {
   }
 
   private async processTopUp(playerId: string, amount: bigint): Promise<void> {
+    const topUpObligationId = `topup:${playerId.slice(0, 12)}:${Date.now()}-${++this.commitCount}`;
     const settled = await this.coordinator.fulfil(
       [
         {
@@ -762,12 +901,13 @@ export class TableServer {
           playerId,
           amount,
           reason: "TOP_UP" as const,
-          obligationId: `topup:${playerId.slice(0, 12)}:${Date.now()}-${++this.commitCount}`,
+          obligationId: topUpObligationId,
         },
       ],
       { handId: "", sequence: this.runtime.tip.sequence, actionHash: `topup:${playerId.slice(0, 10)}` },
     );
     if (settled !== "SETTLED") {
+      await this.resolveAbandonedPayment(playerId, amount, topUpObligationId);
       this.notify(playerId, { type: "ERROR", payload: { code: "TOP_UP_FAILED", detail: "settlement failed" } });
       return;
     }
@@ -1408,6 +1548,7 @@ export class TableServer {
       void this.runExclusive(() => this.resolveTimeout(actingSeat));
     }, timeoutMs);
     this.turnTimers.set(key, timer);
+    this.currentTurnDeadline = { key, deadlineUnixMs: Date.now() + timeoutMs };
   }
 
   /** Disconnect policy: automatic CHECK if legal, otherwise FOLD. */

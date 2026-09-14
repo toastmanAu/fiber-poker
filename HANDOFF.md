@@ -239,10 +239,26 @@ All recorded in `docs/fnn-compat.md` ("VERIFIED AGAINST A LIVE NODE"):
       to the join screen) and "Top up" (TOP_UP → settled between hands,
       queued mid-hand with TOP_UP_QUEUED feedback). Covered in the sim
       browser spec (companion.spec.ts).
-- [ ] Still open on the browser path: missed YOUR_TURN/hole cards are not
-      replayed after a reconnect (backend limit); channel capacity for a
-      session is still provisioned manually (see the deployment note in
-      P4).
+- [x] **Reconnect replay (2026-09-14)**: resyncing mid-hand replays the
+      player's hole cards and, when the acting seat is theirs, their
+      YOUR_TURN with the ORIGINAL deadline (resync never extends the
+      timer). Server-side, in sendSnapshot.
+- [x] **Automatic session capacity (2026-09-14)**: `ensureCapacity`
+      (packages/fiber-adapter/src/capacity.ts) provisions a side's own
+      spendable channel capacity toward a peer. The PlayerAgent ensures it
+      before joining and retries a payment once after opening on
+      insufficient-balance; the companion does the same around every
+      payment; the table auto-opens table-funded capacity when the
+      liquidity gate would refuse a join (FIBER_POKER_AUTO_CAPACITY, on
+      by default). Manual provisioning is no longer required.
+- [x] **Abandoned-payment hygiene (2026-09-14)**: a failed join/top-up
+      settlement now resolves the node-side invoice: paid (late settle) →
+      refunded over the channel immediately; open/held → cancelled so it
+      can never be paid late. ImmediateFiberSettlement.cancel also
+      cancels the actual node invoice now.
+- [ ] Still open on the browser path: missed hole cards ARE replayed, but
+      reconnects during the P10 seed phase and hold-mode sessions are not
+      specifically rehearsed.
 
 ### P4 — persistence hardening on real nodes — ✅ core done (2026-09-11)
 - [x] **Crash/restart cycle with `FileEventStore` against the REAL nodes**

@@ -138,10 +138,19 @@ export class SimulatedFiberNetwork {
     if (n.offline) throw new Error(`node ${pubkey.slice(0, 10)}… is offline`);
   }
 
-  channelBetween(a: string, b: string): SimChannel | undefined {
-    return this.channels.find(
+  channelBetween(a: string, b: string, amount?: bigint): SimChannel | undefined {
+    // Real fnn routes a payment over a channel that can actually carry it:
+    // prefer one with payer-side balance >= amount, then any with balance,
+    // then the first ready channel.
+    const ready = this.channels.filter(
       (c) => c.state === "ChannelReady" && ((c.nodeA === a && c.nodeB === b) || (c.nodeA === b && c.nodeB === a)),
     );
+    const payerSide = (c: SimChannel): bigint => (c.nodeA === a ? c.balanceA : c.balanceB);
+    if (amount !== undefined) {
+      const fits = ready.find((c) => payerSide(c) >= amount);
+      if (fits) return fits;
+    }
+    return ready.find((c) => payerSide(c) > 0n) ?? ready[0];
   }
 
   openChannel(initiator: string, peer: string, funding: bigint): string {
@@ -199,7 +208,7 @@ export class SimulatedFiberNetwork {
     const inv = this.invoices.get(paymentHash);
     if (!inv) throw new Error(`unknown invoice ${paymentHash}`);
     if (inv.status !== "Open") throw new Error(`invoice not payable (status ${inv.status})`);
-    const ch = this.channelBetween(payer, inv.to);
+    const ch = this.channelBetween(payer, inv.to, inv.amount);
     if (!ch) throw new Error(`no channel between ${payer.slice(0, 8)}… and ${inv.to.slice(0, 8)}…`);
     this.route(payer, inv.to, ch, inv.amount);
     if (inv.hold) {
@@ -259,7 +268,7 @@ export class SimulatedFiberNetwork {
       this.payments.set(paymentHash, { paymentHash, from: payer, to: target, amount, status: "Failed", error: injected, latencyTicks: 0 });
       return;
     }
-    const ch = this.channelBetween(payer, target);
+    const ch = this.channelBetween(payer, target, amount);
     if (!ch) throw new Error(`no channel between ${payer.slice(0, 8)}… and ${target.slice(0, 8)}…`);
     try {
       this.route(payer, target, ch, amount);

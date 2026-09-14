@@ -158,6 +158,15 @@ export class ImmediateFiberSettlement implements SettlementAdapter {
   async cancel(ref: SettlementRef, reason: string): Promise<void> {
     const entry = this.entries.get(ref.id);
     if (entry && (entry.status === "PLANNED" || entry.status === "INFLIGHT" || entry.status === "HELD")) {
+      // Cancel the NODE-side invoice too (rc7: cancel_invoice works while
+      // Open) — otherwise a stale payable invoice outlives the settlement.
+      if (entry.obligation.direction === "PLAYER_TO_TABLE") {
+        try {
+          await this.gateway.cancelInvoice?.(entry.paymentHash);
+        } catch {
+          /* already settled/cancelled on the node: nothing to undo */
+        }
+      }
       entry.status = "CANCELLED";
       entry.error = reason;
     }

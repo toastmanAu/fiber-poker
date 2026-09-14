@@ -26,7 +26,7 @@ import {
   generateKeyPair,
   respondToChallenge,
 } from "@fiber-poker/protocol";
-import { RealFiberGateway, type FiberGateway } from "@fiber-poker/fiber-adapter";
+import { RealFiberGateway, ensureCapacity, type FiberGateway } from "@fiber-poker/fiber-adapter";
 
 export interface AgentConfig {
   tableUrl: string;
@@ -57,6 +57,8 @@ export class PlayerAgent {
   private waiters: Pending<Record<string, unknown>>[] = [];
   private sequence = 0n;
   private stateHash = "";
+  /** The table's FIBER node pubkey (from WELCOME) — capacity target. */
+  private tableFiberPeer = "";
   private tableId = "fiber-poker-table-1";
   private handId = "";
   private readonly gateway: FiberGateway;
@@ -85,6 +87,20 @@ export class PlayerAgent {
   /** Connect, authenticate, declare the fiber peer, and take the seat. */
   async join(): Promise<void> {
     await this.connect();
+    // Provision player-side channel capacity toward the table (bets are
+    // paid THROUGH it); rc7 has no post-open funding, so this is the
+    // player's job. Best-effort: proceed even if the open fails — the
+    // join's payment error is the authoritative signal.
+    if (this.tableFiberPeer) {
+      try {
+        await ensureCapacity(this.gateway, this.tableFiberPeer, {
+          min: this.cfg.buyInShannons * 2n,
+          openFunding: 600n * 100_000_000n,
+        });
+      } catch (e) {
+        this.log(`capacity provisioning failed: ${String(e)}`);
+      }
+    }
     this.send("JOIN_TABLE", {
       buyInShannons: this.cfg.buyInShannons.toString(),
       fiberPeerPubkey: await this.gateway.nodePubkey(),
@@ -177,7 +193,9 @@ export class PlayerAgent {
       expiresAt: Number.MAX_SAFE_INTEGER,
     });
     this.send("AUTH_RESPONSE", { pubkey: this.pubkey, challengeId: challenge.challengeId, signature });
-    await this.waitFor("WELCOME", 15_000);
+    const welcome = await this.waitFor("WELCOME", 15_000);
+    this.tableFiberPeer =
+      (welcome.payload as { fiberPeerPubkey?: string }).fiberPeerPubkey ?? "";
     this.log("authenticated");
   }
 
@@ -194,9 +212,9 @@ export class PlayerAgent {
       }
     }
     if (msg.type === "PAYMENT_REQUIRED") {
-      const p = msg.payload as { invoiceAddress?: string; direction: string };
+      const p = msg.payload as { invoiceAddress?: string; direction: string; amountShannons?: string };
       if (p.direction === "PLAYER_TO_TABLE" && p.invoiceAddress) {
-        this.payInvoice(p.invoiceAddress);
+        this.payInvoice(p.invoiceAddress, BigInt(String(p.amountShannons ?? "0")));
       }
     }
     const idx = this.waiters.findIndex((w) => w.filter(msg));
@@ -209,14 +227,30 @@ export class PlayerAgent {
     this.inbox.push(msg);
   }
 
-  private async payInvoice(invoiceAddress: string): Promise<void> {
+  private async payInvoice(invoiceAddress: string, amountShannons = 0n): Promise<void> {
     this.log(`paying invoice ${invoiceAddress.slice(0, 28)}…`);
     try {
       if (!this.gateway.payInvoice) throw new Error("gateway cannot pay invoices");
       const r = await this.gateway.payInvoice(invoiceAddress);
       this.log(`paid ${r.paymentHash.slice(0, 14)}…`);
     } catch (e) {
-      this.log(`PAY FAILED: ${String(e)}`);
+      if (!/insufficient/i.test(String(e)) || !this.tableFiberPeer) {
+        this.log(`PAY FAILED: ${String(e)}`);
+        return;
+      }
+      // Capacity ran out mid-session: provision and retry exactly once.
+      const min = amountShannons > 0n ? amountShannons * 2n : 50n * 100_000_000n;
+      try {
+        await ensureCapacity(this.gateway, this.tableFiberPeer, {
+          min,
+          openFunding: 600n * 100_000_000n,
+        });
+        if (!this.gateway.payInvoice) throw new Error("gateway cannot pay invoices");
+        const r = await this.gateway.payInvoice(invoiceAddress);
+        this.log(`paid after capacity open: ${r.paymentHash.slice(0, 14)}…`);
+      } catch (retryError) {
+        this.log(`PAY FAILED: ${String(retryError)}`);
+      }
     }
   }
 
