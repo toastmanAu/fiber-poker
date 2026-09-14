@@ -4,10 +4,15 @@
   "private": true,
   "type": "module",
   "description": "Headless player agent: holds the player's Fiber credentials, joins the table, auto-pays PAYMENT_REQUIRED invoices (docs/15 PlayerFiberBackend).",
-  "bin": { "fiber-player-agent": "./src/main.ts" },
+  "bin": {
+    "fiber-player-agent": "./src/main.ts"
+  },
   "dependencies": {
     "@fiber-poker/fiber-adapter": "*",
     "@fiber-poker/protocol": "*",
     "ws": "^8.18.0"
+  },
+  "scripts": {
+    "companion": "tsx src/companion-main.ts"
   }
 }

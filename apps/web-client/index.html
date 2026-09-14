@@ -2,77 +2,215 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#0b3d2e" />
-    <title>Fiber Poker — devnet play only</title>
-    <link rel="stylesheet" href="/src/style.css" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#0a141b" />
+    <title>Fiber Poker · The channel table</title>
   </head>
   <body>
     <div id="app">
       <header class="topbar">
-        <div class="brand">Fiber Poker</div>
-        <div class="status-chips" id="status-chips"></div>
+        <a class="brand" href="/" aria-label="Fiber Poker home"
+          ><span class="brand-icon">F</span
+          ><span>FIBER <b>POKER</b><small>THE CHANNEL TABLE</small></span></a
+        >
+        <button
+          id="btn-details"
+          class="icon-button"
+          aria-label="Open audit and table details"
+        >
+          ☷ <span>Table journal</span>
+        </button>
       </header>
-
-      <!-- Trust notice: required, never claim trustlessness -->
-      <div class="trust-banner" id="trust-banner">
-        This table is <strong>authoritative, not trustless</strong>: the server deals the
-        cards and decides settlements. It is auditable (signed hash chain + deck
-        commitment), but you trust the operator for fair dealing.
-        <strong>Devnet/testnet play value only.</strong>
+      <div class="value-notice">DEVNET/TESTNET PLAY VALUE ONLY</div>
+      <div
+        id="status-chips"
+        class="status-chips"
+        aria-label="Connection and security status"
+      ></div>
+      <div id="chain-alert" role="alert" hidden>
+        CHAIN BROKEN — state-chain verification failed. Inspect the table
+        journal.
       </div>
-
-      <main id="main">
-        <!-- connect screen -->
-        <section id="screen-connect" class="screen">
-          <h2>Join the table</h2>
-          <label for="ws-url">Table server</label>
-          <input id="ws-url" type="text" value="ws://127.0.0.1:8080" autocapitalize="off" spellcheck="false" />
-          <label for="buy-in">Buy-in (CKB)</label>
-          <input id="buy-in" type="number" value="100" min="1" inputmode="decimal" />
-          <label class="checkbox-row">
-            <input id="dev-autopay" type="checkbox" checked disabled />
-            DEV MODE: server auto-approves payments (fake settlement)
-          </label>
-          <button id="btn-join" class="btn primary big">Connect &amp; join</button>
-          <p class="hint">Your identity key is generated and stored in this browser only.</p>
-        </section>
-
-        <!-- table screen -->
-        <section id="screen-table" class="screen hidden">
-          <div class="table-wrap">
-            <div class="board" id="board"></div>
-            <div class="pot" id="pot">pot 0</div>
-            <div id="seats"></div>
+      <main>
+        <section id="screen-connect" class="connect-screen">
+          <div class="lobby-art" aria-hidden="true">
+            <span>♠</span><i>F</i>
           </div>
-          <div class="hand-info" id="hand-info"></div>
-
-          <div class="action-bar" id="action-bar">
-            <div class="action-status" id="action-status">waiting…</div>
-            <div class="action-buttons" id="action-buttons">
-              <button class="btn danger" id="btn-fold">Fold</button>
-              <button class="btn" id="btn-check">Check</button>
-              <button class="btn" id="btn-call">Call</button>
-              <div class="raise-row" id="raise-row">
-                <input id="raise-slider" type="range" min="0" max="100" value="0" />
-                <button class="btn accent" id="btn-raise">Raise</button>
-              </div>
+          <div class="eyebrow">SIX SEATS. ONE TABLE.</div>
+          <h1>Every hand.<br />Every payment.<br /><em>On the table.</em></h1>
+          <p class="intro">
+            Texas Hold’em, settled over Fiber.<br />A shared table with a
+            verifiable history.
+          </p>
+          <form id="join-form">
+            <label for="ws-url">Table server</label>
+            <input
+              id="ws-url"
+              type="url"
+              value="ws://127.0.0.1:8080"
+              required
+              autocapitalize="off"
+              spellcheck="false"
+            />
+            <div class="buy-in-row">
+              <label for="buy-in">Buy-in <small>CKB play value</small></label
+              ><input
+                id="buy-in"
+                type="number"
+                value="100"
+                min="1"
+                step="any"
+                required
+                inputmode="decimal"
+              />
+            </div>
+            <details class="identity-options">
+              <summary>Play with a local Fiber companion</summary>
+              <p>
+                Choose the companion’s poker .session.json identity, then
+                connect to its local WebSocket address. The key stays in this
+                tab; node credentials stay in the companion.
+              </p>
+              <label for="agent-identity">Poker identity file</label>
+              <input
+                id="agent-identity"
+                type="file"
+                accept=".json,application/json"
+              />
+              <p id="identity-status" role="status">
+                Using this browser’s saved identity.
+              </p>
+              <button id="btn-clear-identity" type="button" class="text-button">
+                Use browser identity
+              </button>
+            </details>
+            <button id="btn-join" class="btn primary" type="submit">
+              Take a seat <span>↗</span>
+            </button>
+            <p id="join-status" role="status">
+              Your session identity stays in this browser.
+            </p>
+          </form>
+        </section>
+        <section id="screen-table" class="table-screen hidden">
+          <div class="table-heading">
+            <span id="hand-info">Waiting for the table</span
+            ><button
+              id="btn-camera"
+              class="text-button"
+              aria-label="Reset table camera"
+            >
+              Reset view ↺
+            </button>
+          </div>
+          <div id="table-stage" class="table-stage">
+            <div id="seat-overlays" class="seat-overlays"></div>
+            <div id="scene-fallback" hidden>
+              3D graphics are unavailable. The live table details and action
+              controls remain available in the journal.
             </div>
           </div>
-
-          <div class="panels">
-            <section class="panel">
-              <h3>Deck audit</h3>
-              <div id="deck-audit" class="panel-body">No hand revealed yet.</div>
-            </section>
-            <section class="panel">
-              <h3>History</h3>
-              <div id="history" class="panel-body"></div>
-            </section>
+          <div id="payment-status" class="payment-status" role="status">
+            ● Table settlement endpoint · Fiber
+          </div>
+          <div class="action-bar">
+            <div class="turn-row">
+              <span id="action-status" role="status">Waiting for players…</span
+              ><span
+                id="turn-clock"
+                class="turn-clock"
+                aria-label="Turn seconds remaining"
+                >—</span
+              >
+            </div>
+            <div id="raise-row" class="raise-row">
+              <div class="amount-heading">
+                <label for="raise-slider" id="amount-label">Raise to</label
+                ><output id="raise-amount" for="raise-slider">0 CKB</output>
+              </div>
+              <input
+                id="raise-slider"
+                type="range"
+                min="0"
+                max="100"
+                value="0"
+                aria-label="Bet or raise target amount"
+                disabled
+              />
+              <div class="range-labels">
+                <span id="raise-min">Min —</span
+                ><button id="btn-min" class="text-button">Minimum</button
+                ><span id="raise-max">Max —</span>
+              </div>
+            </div>
+            <div id="action-buttons" class="action-buttons">
+              <button class="btn danger" id="btn-fold" disabled>Fold</button
+              ><button class="btn" id="btn-check" disabled>Check</button
+              ><button class="btn" id="btn-call" disabled>Call</button
+              ><button class="btn primary" id="btn-raise" disabled>Raise</button
+              ><button class="btn" id="btn-all-in" disabled>All-in</button>
+            </div>
           </div>
         </section>
       </main>
+      <details class="trust-notice">
+        <summary>Authoritative but auditable <span>ⓘ</span></summary>
+        <p>
+          The server currently deals cards and coordinates settlement. The
+          signed state chain and deck commitment/reveal provide auditability.
+          You still trust the operator with card knowledge and settlement
+          coordination.
+        </p>
+      </details>
     </div>
+    <dialog id="journal" class="journal">
+      <div class="drawer-handle"></div>
+      <header>
+        <div>
+          <div class="eyebrow">BEHIND THE HAND</div>
+          <h2>Table journal</h2>
+        </div>
+        <button
+          id="btn-close-details"
+          class="icon-button"
+          aria-label="Close table journal"
+        >
+          ✕
+        </button>
+      </header>
+      <section>
+        <h3>Connection & Fiber</h3>
+        <pre id="connection-details">Not connected.</pre>
+        <p>
+          Seat indicators refer to the table’s logical settlement endpoint.
+          Remote channel readiness and physical channel topology are not
+          broadcast.
+        </p>
+      </section>
+      <section>
+        <h3>State chain</h3>
+        <div id="chain-details">No commits observed.</div>
+      </section>
+      <section>
+        <h3>Deck audit</h3>
+        <div id="deck-commitment"></div>
+        <div id="deck-audit">No hand revealed yet.</div>
+        <button id="btn-audit" class="text-button" disabled>
+          Request reveal again ↗
+        </button>
+      </section>
+      <section>
+        <h3>Live table</h3>
+        <div id="table-details"></div>
+      </section>
+      <section>
+        <h3>Recent activity</h3>
+        <div id="history">Your table history will appear here.</div>
+      </section>
+    </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

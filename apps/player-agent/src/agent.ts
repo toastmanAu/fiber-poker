@@ -140,6 +140,11 @@ export class PlayerAgent {
     await this.waitFor("PLAYER_LEFT", 60_000, (m) => (m.payload as { playerId?: string }).playerId === this.pubkey).catch(() => undefined);
   }
 
+  /** Drop the socket without ceremony (tests/cleanup). */
+  close(): void {
+    this.ws?.close();
+  }
+
   /**
    * Ask the table for a buy-in top-up. The server applies it between hands
    * (immediately, or queued when a hand is live) and settles the invoice

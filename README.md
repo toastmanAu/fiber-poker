@@ -30,6 +30,18 @@ npm run demo:six        # six-player table on :8091 (side pots, leave/join)
 npm test
 ```
 
+## Three.js table frontend
+
+The browser client now renders a procedural six-seat 3D table with a mobile action
+dock, local-seat camera mapping, payment-before-commit effects, and an audit/history
+journal. No external models or Fiber credentials are needed in the browser.
+See [frontend architecture and verification](docs/web-client-3d.md) for scene
+modules, event mapping, browser test commands and current protocol limitations.
+
+For browser-controlled play with the player's Fiber node, use the
+[local companion runbook](docs/browser-companion.md). The browser imports only the
+poker identity; the companion keeps node credentials and invoice execution local.
+
 ## Configuration (env)
 
 | Variable | Default | Meaning |

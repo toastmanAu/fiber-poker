@@ -16,16 +16,27 @@ import {
   type PublicTableState,
   generateKeyPair,
 } from "@fiber-poker/protocol";
-import { seedCommitment, SEED_BYTES } from "@fiber-poker/deck";
+import { validateAction, type YourTurn } from "./actions.ts";
 
 /** JSON turns `undefined` optional fields into null; canonical encoding
  *  distinguishes absent from null, so restore absent-ness before hashing. */
 function normalizeView<T>(view: T): T {
-  const optionalStrings: (keyof PublicTableState)[] = ["street", "deckCommitment", "abortReason"];
-  const optionalNums: (keyof PublicTableState)[] = ["buttonSeat", "smallBlindSeat", "bigBlindSeat", "actingSeat"];
+  const optionalStrings: (keyof PublicTableState)[] = [
+    "street",
+    "deckCommitment",
+    "abortReason",
+  ];
+  const optionalNums: (keyof PublicTableState)[] = [
+    "buttonSeat",
+    "smallBlindSeat",
+    "bigBlindSeat",
+    "actingSeat",
+  ];
   const out = { ...(view as Record<string, unknown>) };
-  for (const k of optionalStrings) if (out[k as string] === null) delete out[k as string];
-  for (const k of optionalNums) if (out[k as string] === null) delete out[k as string];
+  for (const k of optionalStrings)
+    if (out[k as string] === null) delete out[k as string];
+  for (const k of optionalNums)
+    if (out[k as string] === null) delete out[k as string];
   for (const seat of out.seats as Record<string, unknown>[]) {
     for (const k of ["playerId", "fiberPubkey", "holeCardsHash"]) {
       if (seat[k] === null) delete seat[k];
@@ -60,6 +71,12 @@ export class PokerSession {
   private handlers = new Map<string, Set<Handler>>();
   private expectedSeq = 0n;
   private lastStateHash = "";
+  private disposed = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private holeCardsHandId = "";
+  actionPending = false;
+  channelDetails: Record<string, unknown> = {};
+  companionStatus = "";
   private challenge: { challengeId: string; challenge: string } | null = null;
 
   status: StatusFlags = {
@@ -71,18 +88,26 @@ export class PokerSession {
     sittingOut: false,
     reconnecting: false,
   };
-  chain: ChainObservation = { sequence: 0n, stateHash: "", verifiedCount: 0, broken: false };
+  chain: ChainObservation = {
+    sequence: 0n,
+    stateHash: "",
+    verifiedCount: 0,
+    broken: false,
+  };
   tableState: PublicTableState | null = null;
-  holeCards: string[] = [];
+  holeCards: (number | string)[] = [];
   /** P10: per-hand secret seeds (committed then revealed). */
   seedSeeds = new Map<string, Uint8Array>();
-  yourTurn: Record<string, unknown> | null = null;
+  yourTurn: YourTurn | null = null;
   tablePubkey = "";
   devMode = { autoPay: false, fakeSettlement: false };
 
-  constructor(url: string) {
+  constructor(
+    url: string,
+    identity?: { privateKey: string; publicKey: string },
+  ) {
     this.url = url;
-    this.keys = loadOrCreateKeys();
+    this.keys = identity ?? loadOrCreateKeys();
   }
 
   get pubkey(): string {
@@ -104,82 +129,182 @@ export class PokerSession {
   }
 
   async connect(): Promise<void> {
-    this.ws = new WebSocket(this.url);
-    await new Promise<void>((resolve, reject) => {
-      this.ws!.onopen = () => resolve();
-      this.ws!.onerror = () => reject(new Error("connection failed"));
-      setTimeout(() => reject(new Error("connection timeout")), 8000);
-    });
-    this.ws.onmessage = (ev) => this.ingest(JSON.parse(ev.data as string));
-    this.ws.onclose = () => {
-      this.status.wsConnected = false;
-      this.status.reconnecting = true;
-      this.emit("status", {});
-      setTimeout(() => void this.reconnect(), 1500);
+    if (this.disposed) return;
+    this.challenge = null;
+    const ws = new WebSocket(this.url);
+    this.ws = ws;
+    ws.onmessage = (ev) => {
+      try {
+        this.ingest(JSON.parse(ev.data as string));
+      } catch (error) {
+        this.emit("ERROR", { payload: { detail: String(error) } });
+      }
     };
+    ws.onclose = () => {
+      this.status.wsConnected = false;
+      this.companionStatus = "";
+      this.status.authenticated = false;
+      this.status.channelReady = false;
+      this.status.seatReady = false;
+      this.status.reconnecting = !this.disposed;
+      this.yourTurn = null;
+      this.emit("status", {});
+      if (!this.disposed) this.scheduleReconnect();
+    };
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ws.close();
+        reject(new Error("connection timeout"));
+      }, 8000);
+      ws.onopen = () => {
+        clearTimeout(timeout);
+        resolve();
+      };
+      ws.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error("connection failed"));
+      };
+    });
     this.status.wsConnected = true;
     this.send("HELLO", { pubkey: this.keys.publicKey });
   }
 
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer || this.disposed) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.reconnect();
+    }, 1500);
+  }
+
   async reconnect(): Promise<void> {
     try {
-      this.handlers.get("*")?.clear();
       await this.connect();
-      this.status.reconnecting = false;
       await this.authenticate();
-      // Resync: send our last accepted chain position; server answers with a snapshot.
-      this.send("RESYNC", { lastSequence: this.expectedSeq.toString(), lastStateHash: this.lastStateHash });
+      this.send("RESYNC", {
+        lastSequence: this.expectedSeq.toString(),
+        lastStateHash: this.lastStateHash,
+      });
     } catch {
-      setTimeout(() => void this.reconnect(), 2000);
+      this.scheduleReconnect();
     }
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.ws?.close();
+    this.handlers.clear();
+  }
+
+  private acceptState(state: PublicTableState, committed = true): void {
+    const advanced =
+      state.sequence !== this.tableState?.sequence ||
+      state.handId !== this.tableState?.handId;
+    if (state.handId !== this.holeCardsHandId) this.holeCards = [];
+    this.tableState = state;
+    this.yourTurn = null;
+    if (committed || advanced) {
+      this.actionPending = false;
+      this.status.paymentPending = false;
+    }
+    const local = state.seats.find((s) => s.playerId === this.pubkey);
+    this.status.sittingOut = !!local?.sittingOut;
+    this.status.seatReady =
+      !!local && this.status.wsConnected && this.status.authenticated;
   }
 
   private ingest(raw: Record<string, unknown>): void {
     const type = String(raw.type);
     switch (type) {
       case "AUTH_CHALLENGE":
-        this.challenge = raw.payload as { challengeId: string; challenge: string };
+        this.challenge = raw.payload as {
+          challengeId: string;
+          challenge: string;
+        };
         this.emit("auth_challenge", raw);
         break;
       case "WELCOME": {
         this.status.authenticated = true;
-        const p = raw.payload as { tablePubkey: string; devMode?: { autoPay: boolean; fakeSettlement: boolean } };
+        const p = raw.payload as {
+          tablePubkey: string;
+          devMode?: { autoPay: boolean; fakeSettlement: boolean };
+        };
         this.tablePubkey = p.tablePubkey;
         if (p.devMode) this.devMode = p.devMode;
         break;
       }
-      case "HOLE_CARDS":
-        this.holeCards = (raw.payload as { cards: string[] }).cards;
+      case "HOLE_CARDS": {
+        const p = raw.payload as { handId: string; cards: (number | string)[] };
+        if (p.handId === this.tableState?.handId) {
+          this.holeCardsHandId = p.handId;
+          this.holeCards = p.cards;
+        }
         break;
+      }
       case "YOUR_TURN":
-        this.yourTurn = raw.payload as Record<string, unknown>;
+        this.yourTurn = raw.payload as unknown as YourTurn;
         break;
       case "STATE_COMMIT":
-        this.observeCommit(raw as unknown as { payload: { stateHash: string; previousStateHash: string; state: PublicTableState; actionHash: string } });
+        this.observeCommit(
+          raw as unknown as {
+            payload: {
+              stateHash: string;
+              previousStateHash: string;
+              state: PublicTableState;
+              actionHash: string;
+            };
+          },
+        );
         break;
       case "TABLE_SNAPSHOT": {
-        const p = raw.payload as { state: PublicTableState; chainTip?: { sequence: string; stateHash: string } };
-        this.tableState = normalizeView(p.state);
+        const p = raw.payload as {
+          state: PublicTableState;
+          chainTip?: { sequence: string; stateHash: string };
+          seats?: { playerId: string; lifecycle: string; connected: boolean }[];
+        };
+        this.acceptState(normalizeView(p.state), false);
+        this.status.reconnecting = false;
+        const seat = p.seats?.find((s) => s.playerId === this.pubkey);
+        if (seat?.connected) this.observeSeatStatus(seat.lifecycle);
         if (p.chainTip) {
           this.expectedSeq = BigInt(p.chainTip.sequence);
           this.lastStateHash = p.chainTip.stateHash;
+          this.chain.sequence = this.expectedSeq;
+          this.chain.stateHash = this.lastStateHash;
         }
         break;
       }
       case "PAYMENT_REQUIRED":
         this.status.paymentPending = true;
-        if (this.devMode.autoPay) {
-          setTimeout(() => {
-            this.status.paymentPending = false;
-            this.emit("status", {});
-          }, 1200);
+        break;
+      case "PAYMENT_STATUS": {
+        const status = String((raw.payload as { status: string }).status);
+        // Success is not a commit. Keep controls/pulse pending until STATE_COMMIT.
+        if (["FAILED", "CANCELED", "CANCELLED", "EXPIRED"].includes(status)) {
+          this.status.paymentPending = false;
+          this.actionPending = false;
         }
         break;
-      case "PAYMENT_STATUS":
+      }
+      case "ACTION_REJECTED":
+        this.actionPending = false;
         this.status.paymentPending = false;
         break;
+      case "COMPANION_STATUS":
+        this.companionStatus = String(
+          (raw.payload as { status: string }).status,
+        );
+        break;
+      case "CHANNEL_STATUS":
+        this.channelDetails = raw.payload as Record<string, unknown>;
+        this.status.channelReady =
+          this.channelDetails.state === "CHANNEL_READY";
+        break;
       case "SEAT_STATUS":
-        this.observeSeatStatus(String((raw.payload as { lifecycle: string }).lifecycle));
+        this.observeSeatStatus(
+          String((raw.payload as { lifecycle: string }).lifecycle),
+        );
         break;
     }
     this.emit(type, raw);
@@ -187,18 +312,31 @@ export class PokerSession {
   }
 
   private observeSeatStatus(lifecycle: string): void {
-    if (lifecycle === "CHANNEL_READY" || lifecycle === "LIQUIDITY_CHECK") this.status.channelReady = true;
+    if (lifecycle === "CHANNEL_READY" || lifecycle === "LIQUIDITY_CHECK")
+      this.status.channelReady = true;
     if (lifecycle === "SEAT_READY" || lifecycle === "PLAYING") {
       this.status.seatReady = true;
       this.status.channelReady = true;
     }
-    if (lifecycle === "DISCONNECTED") {
+    if (
+      ["DISCONNECTED", "CONNECTED", "CHANNEL_NEGOTIATING", "CLOSING"].includes(
+        lifecycle,
+      )
+    ) {
       this.status.seatReady = false;
+      this.status.channelReady = false;
     }
   }
 
   /** Verify every commit links to the previous hash we accepted. */
-  private observeCommit(commit: { payload: { stateHash: string; previousStateHash: string; state: PublicTableState; actionHash: string } }): void {
+  private observeCommit(commit: {
+    payload: {
+      stateHash: string;
+      previousStateHash: string;
+      state: PublicTableState;
+      actionHash: string;
+    };
+  }): void {
     const p = commit.payload;
     if (this.lastStateHash && p.previousStateHash !== this.lastStateHash) {
       this.chain.broken = true;
@@ -212,26 +350,51 @@ export class PokerSession {
       this.chain.verifiedCount += 1;
       // Acknowledge verified states: durable dispute evidence on the server
       // (docs/05 ACK(tableId, handId, sequence, stateHash)).
-      this.send("ACK_STATE", { sequence: String(p.state.sequence), stateHash: p.stateHash });
+      this.send("ACK_STATE", {
+        sequence: String(p.state.sequence),
+        stateHash: p.stateHash,
+      });
     }
     this.expectedSeq = BigInt(String(p.state.sequence));
     this.lastStateHash = p.stateHash;
-    this.tableState = view;
+    this.acceptState(view);
     this.chain.sequence = this.expectedSeq;
     this.chain.stateHash = p.stateHash;
   }
 
+  private waitFor(
+    type: string,
+    timeoutMs = 8000,
+  ): Promise<Record<string, unknown>> {
+    return new Promise((resolve, reject) => {
+      const handler: Handler = (msg) => {
+        clearTimeout(timer);
+        this.off(type, handler);
+        resolve(msg);
+      };
+      const timer = setTimeout(() => {
+        this.off(type, handler);
+        reject(new Error(`${type} timeout`));
+      }, timeoutMs);
+      this.on(type, handler);
+    });
+  }
+
   async authenticate(): Promise<void> {
-    if (!this.challenge) {
-      await new Promise<void>((resolve) => this.on("auth_challenge", () => resolve()));
-    }
-    if (!this.challenge) return;
+    if (!this.challenge) await this.waitFor("auth_challenge");
+    if (!this.challenge) throw new Error("Missing authentication challenge");
     const signature = respondToChallenge(this.keys.privateKey, {
       ...this.challenge,
       issuedAt: 0,
       expiresAt: Number.MAX_SAFE_INTEGER,
     });
-    this.send("AUTH_RESPONSE", { pubkey: this.keys.publicKey, challengeId: this.challenge.challengeId, signature });
+    const welcome = this.waitFor("WELCOME");
+    this.send("AUTH_RESPONSE", {
+      pubkey: this.keys.publicKey,
+      challengeId: this.challenge.challengeId,
+      signature,
+    });
+    await welcome;
   }
 
   async join(buyInCkb: number, seat?: number): Promise<void> {
@@ -242,6 +405,20 @@ export class PokerSession {
   }
 
   async act(action: { type: string; amount?: bigint }): Promise<void> {
+    if (
+      !this.status.wsConnected ||
+      !this.status.authenticated ||
+      this.status.reconnecting
+    )
+      throw new Error("Waiting for the authenticated connection.");
+    if (this.actionPending || this.status.paymentPending)
+      throw new Error("An action is already pending.");
+    validateAction(this.yourTurn, action);
+    if (
+      this.yourTurn!.handId !== this.tableState?.handId ||
+      BigInt(this.yourTurn!.sequence) !== this.expectedSeq + 1n
+    )
+      throw new Error("Waiting for a current turn.");
     const env: ActionEnvelope = buildEnvelope({
       privateKey: this.keys.privateKey,
       actorPubkey: this.keys.publicKey,
@@ -253,6 +430,8 @@ export class PokerSession {
       nonce: randomNonce(),
     });
     this.send("ACTION", { envelope: env });
+    this.actionPending = true;
+    this.emit("status", {});
   }
 
   leave(): void {
@@ -265,7 +444,16 @@ export class PokerSession {
 
   private send(type: string, payload: unknown): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify({ type, protocolVersion: 1, messageId: randomNonce(), payload }));
+      this.ws.send(
+        JSON.stringify({
+          type,
+          protocolVersion: 1,
+          messageId: randomNonce(),
+          payload,
+        }),
+      );
+    } else {
+      throw new Error("Server connection is closed.");
     }
   }
 
@@ -290,7 +478,9 @@ function loadOrCreateKeys(): { privateKey: string; publicKey: string } {
       /* regenerate */
     }
   }
-  const keys = generateKeyPair((n) => crypto.getRandomValues(new Uint8Array(n)));
+  const keys = generateKeyPair((n) =>
+    crypto.getRandomValues(new Uint8Array(n)),
+  );
   localStorage.setItem("fiber-poker-key", JSON.stringify(keys));
   return keys;
 }

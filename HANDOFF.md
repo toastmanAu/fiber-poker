@@ -1,6 +1,6 @@
 # Session Handoff — Fiber Poker
 
-**Last updated:** 2026-09-11
+**Last updated:** 2026-09-14
 **Repo:** https://github.com/toastmanAu/fiber-poker (branch `master`)
 **Working copy on the laptop:** `~/fiber-poker/fiber-poker`
 **Original spec handoff:** `~/fiber-poker/fiber-poker-agent-handoff/`
@@ -25,8 +25,10 @@ the project stands, how to reach the live test environment, and what remains.
 | **Six-agent live demo** | ✅ full table behind one player node, live (details §3.7) |
 | **Hold-mode live session** | ✅ hold-at-bet → settle-at-hand-end on rc7 (details §3.8) |
 
-Suite: **109 pass + 10 gated-skip (live tests run only with env vars)**.
-Typecheck clean. Everything committed and pushed.
+Suite: **123 pass + 12 gated-skip (vitest; live tests run only with env
+vars)** plus the Playwright browser specs (sim companion spec green; the
+live companion rehearsal is env-gated). Typecheck clean. Committed and
+pushed through the P3 completion (browser companion + live rehearsal).
 
 Run everything from `~/fiber-poker/fiber-poker`:
 
@@ -209,13 +211,31 @@ All recorded in `docs/fnn-compat.md` ("VERIFIED AGAINST A LIVE NODE"):
       the classifier/bump path reuses the same fee rate — re-check only if
       funding multi-thousand-CKB channels ever).
 
-### P3 — web client on live nodes
-- [ ] The browser client still targets fake-settlement tables. With the
-      player agent running beside it (same session key directory), the web
-      UI can spectate/act while the agent pays. Wire the web client's
-      session-key storage to optionally load the agent's key file.
-- [ ] Surface `PAYMENT_REQUIRED`/`PAYMENT_STATUS` transitions distinctly
-      in the status chips (design exists in `main.ts`, verify end-to-end).
+### P3 — web client on live nodes — implementation + simulated verification (2026-09-14)
+- [x] Optional agent-format poker identity import in the browser, validated and
+      kept only in the tab. Existing saved browser identity remains available.
+- [x] Local companion relay (`apps/player-agent/src/companion.ts`): one upstream
+      session, browser-signed actions forwarded unchanged, configured player FNN
+      identity declared on join, optional invoice payment via the existing gateway.
+      **Correction to the earlier plan:** merely sharing a key between two direct
+      connections does not work: SessionManager replaces the old connection.
+      Run the companion instead of the headless playing agent for this player.
+- [x] PAYMENT_REQUIRED/PAYMENT_STATUS preserved, with distinct local companion
+      observations. Only the table's authoritative commit moves chips. Local
+      payment submission/failure never fabricates a commit or unlocks pending play.
+- [x] Browser integration exercised against SimulatedFiberNetwork, including
+      identity import, buy-in/blinds, signed raise and payment-before-commit.
+- [x] **Live-node companion rehearsal PASSED (2026-09-14)**:
+      `apps/web-client/browser/companion-live.spec.ts` (env-gated, mirrors
+      the sim spec) drives the REAL browser UI through the companion
+      against the real nodes: alice joins from the browser, the companion
+      pays her buy-in + blinds over the player node, bob (headless agent)
+      calls down with real payments, alice acts from the browser, the hand
+      settles for real, conservation holds, zero page errors — 14s end to
+      end. Gotchas: heads-up means the BUTTON acts first (the bot must be
+      driven or its timeout-fold ends the hand before the browser acts);
+      the UI has no leave control yet, so the browser seat stays after the
+      hand (cash-out via any future session with the same key).
 
 ### P4 — persistence hardening on real nodes — ✅ core done (2026-09-11)
 - [x] **Crash/restart cycle with `FileEventStore` against the REAL nodes**
