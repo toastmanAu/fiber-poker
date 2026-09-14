@@ -510,6 +510,27 @@ input[type="range"] {
   font-size: 12px;
   padding: 8px 3px;
 }
+.seat-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.seat-controls input {
+  width: 84px;
+  padding: 6px 8px;
+}
+.seat-controls .btn {
+  font-size: 12px;
+  padding: 7px 12px;
+}
+.topup-unit {
+  font-size: 11px;
+  color: #819c9b;
+}
+.seat-controls-spacer {
+  flex: 1;
+}
 .trust-notice {
   font-size: 10px;
   color: #819c9b;

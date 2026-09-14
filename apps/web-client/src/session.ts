@@ -438,6 +438,14 @@ export class PokerSession {
     this.send("LEAVE_REQUEST", {});
   }
 
+  /** Buy-in top-up: the table settles it between hands (queued while a
+   *  hand is live) through the same payer that covers the bets. */
+  topUp(amountCkb: number): void {
+    this.send("TOP_UP", {
+      amountShannons: BigInt(Math.round(amountCkb * 100_000_000)).toString(),
+    });
+  }
+
   requestDeckAudit(handId: string): void {
     this.send("DECK_AUDIT", { handId });
   }

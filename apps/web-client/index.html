@@ -153,6 +153,26 @@
               ><button class="btn primary" id="btn-raise" disabled>Raise</button
               ><button class="btn" id="btn-all-in" disabled>All-in</button>
             </div>
+            <div class="seat-controls">
+              <button id="btn-topup" class="btn" type="button" disabled>
+                Top up
+              </button>
+              <input
+                id="top-up"
+                type="number"
+                value="10"
+                min="1"
+                step="any"
+                inputmode="decimal"
+                aria-label="Top-up amount in CKB"
+                disabled
+              />
+              <span class="topup-unit">CKB</span>
+              <span class="seat-controls-spacer"></span>
+              <button id="btn-leave" class="btn danger" type="button" disabled>
+                Cash out &amp; leave
+              </button>
+            </div>
           </div>
         </section>
       </main>

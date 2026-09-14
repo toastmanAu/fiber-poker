@@ -209,6 +209,14 @@ function renderActions(): void {
     $("raise-max").textContent = `Max ${formatCkb(turn.legal.maxRaiseTo)}`;
     renderAmount();
   }
+  const seated = !!session?.tableState?.seats.some(
+    (s) => s.playerId === session?.pubkey,
+  );
+  $<HTMLButtonElement>("btn-leave").disabled =
+    !seated || !!session?.actionPending;
+  $<HTMLButtonElement>("btn-topup").disabled =
+    !seated || !!session?.status.paymentPending;
+  $<HTMLInputElement>("top-up").disabled = !seated;
   $("action-status").textContent = session?.status.paymentPending
     ? "Payment pending · waiting for commit"
     : session?.actionPending
@@ -278,6 +286,30 @@ async function start(): Promise<void> {
     );
   });
   active.on("TABLE_SNAPSHOT", showTable);
+  active.on("PLAYER_LEFT", (msg) => {
+    const p = msg.payload as { playerId: string };
+    if (p.playerId !== active.pubkey) return;
+    pushHistory("Left the table · cash-out paid over your channel");
+    $("join-status").textContent =
+      "Left the table — your stack was paid out over your channel.";
+    $("screen-connect").classList.remove("hidden");
+    $("screen-table").classList.add("hidden");
+    $("app").classList.remove("playing");
+    $<HTMLButtonElement>("btn-join").disabled = false;
+    if (session === active) {
+      active.dispose();
+      session = null;
+    }
+  });
+  active.on("TOP_UP_APPLIED", (msg) => {
+    const p = msg.payload as { amount?: string };
+    const ckb = p.amount ? (Number(p.amount) / 1e8).toFixed(2) : "?";
+    pushHistory(`Top-up applied · +${ckb} CKB`);
+  });
+  active.on("SEAT_STATUS", (msg) => {
+    if ((msg.payload as { lifecycle?: string }).lifecycle === "TOP_UP_QUEUED")
+      pushHistory("Top-up queued · applies between hands");
+  });
   active.on("HOLE_CARDS", () => renderTable());
   active.on("HAND_START", (msg) => {
     const p = msg.payload as { state: PublicTableState };
@@ -401,6 +433,39 @@ async function start(): Promise<void> {
 $("join-form").addEventListener("submit", (e) => {
   e.preventDefault();
   void start();
+});
+$("btn-leave").addEventListener("click", () => {
+  if (!session) return;
+  const local = session.tableState?.seats.find(
+    (s) => s.playerId === session!.pubkey,
+  );
+  const stackCkb = local ? Number(local.stack) / 1e8 : 0;
+  try {
+    session.leave();
+    // Mid-hand leaves are queued by the table and applied between hands.
+    $("join-status").textContent = `Cashing out ${stackCkb.toFixed(
+      2,
+    )} CKB — the payout follows over your channel.`;
+    $("screen-connect").classList.remove("hidden");
+    $("screen-table").classList.add("hidden");
+    $("app").classList.remove("playing");
+  } catch (error) {
+    pushHistory(`Leave failed · ${String(error)}`);
+  }
+});
+$("btn-topup").addEventListener("click", () => {
+  if (!session) return;
+  const amount = Number($<HTMLInputElement>("top-up").value);
+  if (!(amount > 0)) {
+    pushHistory("Top-up: enter a positive CKB amount");
+    return;
+  }
+  try {
+    session.topUp(amount);
+    pushHistory(`Top-up requested · ${amount} CKB`);
+  } catch (error) {
+    pushHistory(`Top-up failed · ${String(error)}`);
+  }
 });
 $("btn-fold").addEventListener("click", () => void submit("FOLD"));
 $("btn-check").addEventListener("click", () => void submit("CHECK"));

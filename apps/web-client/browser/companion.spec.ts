@@ -124,6 +124,34 @@ test("browser imports agent identity and plays through a simulated Fiber compani
     await expect(page.locator(".local .player-stack")).not.toHaveText(stack!);
     await expect(page.locator("#chain-alert")).toBeHidden();
     expect(errors).toEqual([]);
+
+    // --- between-hands seat controls: top-up, then cash out -----------------
+    // End the live hand so the browser seat is between hands.
+    const botTurn = await bot.waitFor("YOUR_TURN", 15000).catch(() => null);
+    if (botTurn) await bot.act({ type: "FOLD" });
+    await expect
+      .poll(() => server.runtime.state.phase, { timeout: 30000 })
+      .toMatch(/HAND_COMPLETE|WAITING/);
+
+    // Top-up settles through the simulated fiber and lands on the stack.
+    const stackBefore = await page
+      .locator(".local .player-stack")
+      .textContent();
+    await page.locator("#top-up").fill("5");
+    await page.locator("#btn-topup").click();
+    await expect(page.locator("#history")).toContainText("Top-up applied");
+    await expect
+      .poll(async () => {
+        return page.locator(".local .player-stack").textContent();
+      })
+      .not.toBe(stackBefore);
+
+    // Cash out: payout over the channel, seat removed, back to the join screen.
+    await page.locator("#btn-leave").click();
+    await expect(page.locator("#join-status")).toContainText(
+      "paid out over your channel",
+    );
+    await expect.poll(() => server.seatRecords().length).toBe(1); // only the bot
   } finally {
     release?.();
     bot.close();
