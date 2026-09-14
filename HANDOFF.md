@@ -233,9 +233,16 @@ All recorded in `docs/fnn-compat.md` ("VERIFIED AGAINST A LIVE NODE"):
       calls down with real payments, alice acts from the browser, the hand
       settles for real, conservation holds, zero page errors — 14s end to
       end. Gotchas: heads-up means the BUTTON acts first (the bot must be
-      driven or its timeout-fold ends the hand before the browser acts);
-      the UI has no leave control yet, so the browser seat stays after the
-      hand (cash-out via any future session with the same key).
+      driven or its timeout-fold ends the hand before the browser acts).
+- [x] **UI seat controls (2026-09-14)**: the table screen now has
+      "Cash out & leave" (LEAVE_REQUEST → payout over the channel → back
+      to the join screen) and "Top up" (TOP_UP → settled between hands,
+      queued mid-hand with TOP_UP_QUEUED feedback). Covered in the sim
+      browser spec (companion.spec.ts).
+- [ ] Still open on the browser path: missed YOUR_TURN/hole cards are not
+      replayed after a reconnect (backend limit); channel capacity for a
+      session is still provisioned manually (see the deployment note in
+      P4).
 
 ### P4 — persistence hardening on real nodes — ✅ core done (2026-09-11)
 - [x] **Crash/restart cycle with `FileEventStore` against the REAL nodes**
