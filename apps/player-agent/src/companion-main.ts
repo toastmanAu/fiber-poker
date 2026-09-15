@@ -4,6 +4,14 @@ import { generateKeyPair, publicKeyFromPrivate } from "@fiber-poker/protocol";
 import { RealFiberGateway } from "@fiber-poker/fiber-adapter";
 import { PlayerCompanion } from "./companion.ts";
 
+function baseName(keyPath: string, suffix: string): string {
+  const dir = keyPath.slice(0, keyPath.lastIndexOf("/") + 1);
+  const file = keyPath.slice(keyPath.lastIndexOf("/") + 1);
+  const dot = file.lastIndexOf(".session.json");
+  const stem = dot >= 0 ? file.slice(0, dot) : file;
+  return `${dir}${stem}${suffix}.session.json`;
+}
+
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 ? process.argv[i + 1] : undefined;
@@ -23,29 +31,47 @@ async function main(): Promise<void> {
       arg("key-dir") ?? ".data/agents",
       `${name.replace(/[^a-zA-Z0-9-]/g, "_")}.session.json`,
     );
-  // On-ramp: --generate-identity creates (or reuses) a poker identity for
-  // this player and serves it to the loopback browser on request.
+  // On-ramp: --generate-identity creates (or reuses) poker identities and
+  // serves them to loopback browsers on request. --players N builds a pool
+  // of N identities (shared funding node, per-player seats).
   const generate = process.argv.includes("--generate-identity");
+  const playerCount = Math.max(1, Number(arg("players") ?? 1) || 1);
   let generatedIdentity: { privateKey: string; publicKey: string } | undefined;
-  let keys: { privateKey: string; publicKey: string };
-  if (generate && !existsSync(keyPath)) {
-    keys = generateKeyPair((n) => crypto.getRandomValues(new Uint8Array(n)));
-    mkdirSync(dirname(keyPath), { recursive: true });
-    writeFileSync(keyPath, JSON.stringify(keys), { mode: 0o600 });
-    generatedIdentity = keys;
-    console.log(`[companion] generated new poker identity: ${keys.publicKey}`);
-  } else {
-    keys = JSON.parse(readFileSync(keyPath, "utf8")) as {
-      privateKey: string;
-      publicKey: string;
-    };
-    if (generate) generatedIdentity = keys; // reuse + serve on request
+  let firstKeys: { privateKey: string; publicKey: string } | undefined;
+  const players: {
+    privateKey: string;
+    publicKey: string;
+    generated: boolean;
+  }[] = [];
+  mkdirSync(dirname(keyPath), { recursive: true });
+  for (let i = 1; i <= playerCount; i++) {
+    const suffix = playerCount === 1 ? "" : `-${i}`;
+    const path = join(
+      dirname(keyPath),
+      `${baseName(keyPath, suffix)}`,
+    );
+    let keys: { privateKey: string; publicKey: string };
+    if (generate && !existsSync(path)) {
+      keys = generateKeyPair((n) => crypto.getRandomValues(new Uint8Array(n)));
+      writeFileSync(path, JSON.stringify(keys), { mode: 0o600 });
+      console.log(`[companion] generated poker identity ${i}/${playerCount}: ${keys.publicKey}`);
+    } else {
+      keys = JSON.parse(readFileSync(path, "utf8")) as {
+        privateKey: string;
+        publicKey: string;
+      };
+      console.log(`[companion] using poker identity ${i}/${playerCount}: ${path}`);
+    }
+    if (
+      !/^[0-9a-f]{64}$/.test(keys.privateKey) ||
+      publicKeyFromPrivate(keys.privateKey) !== keys.publicKey
+    )
+      throw new Error(`Invalid agent poker identity file: ${path}`);
+    players.push({ privateKey: keys.privateKey, publicKey: keys.publicKey, generated: generate });
+    firstKeys ??= keys;
   }
-  if (
-    !/^[0-9a-f]{64}$/.test(keys.privateKey) ||
-    publicKeyFromPrivate(keys.privateKey) !== keys.publicKey
-  )
-    throw new Error("Invalid agent poker identity file.");
+  const keys = firstKeys!;
+  if (generate) generatedIdentity = firstKeys;
   const port = Number(arg("port") ?? 8788);
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error("Invalid companion port.");
@@ -61,6 +87,7 @@ async function main(): Promise<void> {
     port,
     payInvoices,
     generatedIdentity,
+    players,
     minCapacityShannons,
     gateway: new RealFiberGateway({
       url: fnnUrl,

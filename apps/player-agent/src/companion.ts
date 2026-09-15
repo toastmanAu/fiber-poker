@@ -17,6 +17,11 @@ export interface CompanionConfig {
    *  this may be served to the loopback browser on IDENTITY_REQUEST —
    *  operator-provided identity files are never exposed over the wire. */
   generatedIdentity?: { privateKey: string; publicKey: string };
+  /** Shared funding: MULTIPLE player identities served from one process
+   *  (one browser per identity). Generated entries are served on
+   *  IDENTITY_REQUEST round-robin; every invoice paid is recorded in the
+   *  per-player spend ledger for operator settlement. */
+  players?: { privateKey: string; publicKey: string; generated: boolean }[];
   /** On-ramp: player-side capacity to ensure toward the table once the
    *  table's fiber peer is known (WELCOME). Off when absent or zero. */
   minCapacityShannons?: bigint;
@@ -25,7 +30,9 @@ export interface CompanionConfig {
 }
 export class PlayerCompanion {
   private listener: WebSocketServer | null = null;
-  private browser: WebSocket | null = null;
+  /** One browser per served identity (shared funding: N players, N tabs). */
+  private browsers = new Set<WebSocket>();
+  private browserPlayers = new Map<WebSocket, string>();
   private upstream: WebSocket | null = null;
   private peer = "";
   /** The table's FIBER node pubkey (from the upstream WELCOME) — capacity
@@ -33,7 +40,65 @@ export class PlayerCompanion {
   private tableFiberPeer = "";
   private payments = new Map<string, Promise<void>>();
   private stopped = false;
-  constructor(private readonly config: CompanionConfig) {}
+  /** Shared funding: the identities this companion serves. Built from
+   *  `players` (multi-player) or the single-player fields. */
+  private readonly pool: {
+    publicKey: string;
+    privateKey: string;
+    generated: boolean;
+    claimed: boolean;
+  }[] = [];
+  /** Per-player spend ledger: every invoice this companion paid, attributed
+   *  to the paying identity. Cash-outs are settled by the operator by
+   *  joining obligationIds against the table's event log. */
+  private readonly ledger: {
+    playerId: string;
+    obligationId: string;
+    reason: string;
+    amountShannons: string;
+    paidAt: string;
+  }[] = [];
+  constructor(private readonly config: CompanionConfig) {
+    const generated = config.generatedIdentity;
+    if (generated) {
+      this.pool.push({
+        publicKey: generated.publicKey,
+        privateKey: generated.privateKey,
+        generated: true,
+        claimed: false,
+      });
+    }
+    for (const p of config.players ?? []) {
+      if (this.pool.some((e) => e.publicKey === p.publicKey)) continue;
+      this.pool.push({
+        publicKey: p.publicKey,
+        privateKey: p.privateKey,
+        generated: p.generated,
+        claimed: false,
+      });
+    }
+    // Legacy single-player config: the configured identity is served for
+    // authentication but never handed out over the wire.
+    if (this.pool.length === 0 && config.playerId) {
+      this.pool.push({
+        publicKey: config.playerId,
+        privateKey: "",
+        generated: false,
+        claimed: false,
+      });
+    }
+  }
+
+  /** Per-player spend ledger (operator settlement). */
+  exportLedger(): {
+    playerId: string;
+    obligationId: string;
+    reason: string;
+    amountShannons: string;
+    paidAt: string;
+  }[] {
+    return this.ledger.map((e) => ({ ...e }));
+  }
   get port(): number {
     const address = this.listener?.address();
     return address && typeof address !== "string" ? address.port : 0;
@@ -47,8 +112,10 @@ export class PlayerCompanion {
       verifyClient: ({ origin }, done) => {
         if (!this.config.allowedOrigins.includes(origin))
           return done(false, 403, "Origin not allowed");
-        if (this.browser?.readyState === WebSocket.OPEN)
-          return done(false, 409, "Browser already connected");
+        // One browser per served identity; a second tab for the SAME
+        // identity would replace its table session (SessionManager).
+        if (this.browsers.size >= this.pool.length)
+          return done(false, 409, "Every served identity already has a browser");
         done(true);
       },
     });
@@ -59,13 +126,15 @@ export class PlayerCompanion {
     });
   }
   private attach(browser: WebSocket): void {
-    if (this.browser?.readyState === WebSocket.OPEN) {
-      browser.close(1008, "Browser already connected");
+    if (this.browsers.size >= this.pool.length) {
+      browser.close(1009, "Every served identity already has a browser");
       return;
     }
-    this.browser = browser;
+    this.browsers.add(browser);
     let upstream: WebSocket | null = null;
     let authenticated = false;
+    /** The identity this browser authenticated with (pool member). */
+    let connectionPlayer = "";
     const queued: string[] = [];
     const timer = setTimeout(
       () => browser.close(1008, "Authentication timeout"),
@@ -85,30 +154,50 @@ export class PlayerCompanion {
         fail("COMPANION_BAD_MESSAGE", "Invalid poker message.");
         return;
       }
-      // On-ramp: the loopback browser may request the identity THIS run
-      // generated. Pre-existing identity files are never served.
+      // On-ramp: the loopback browser may request an identity THIS run
+      // generated (round-robin from the pool). Operator-provided identity
+      // files are never served over the wire.
       if (message.type === "IDENTITY_REQUEST") {
-        const generated = this.config.generatedIdentity;
-        if (!generated) {
-          fail("COMPANION_IDENTITY_DISABLED", "This companion did not generate an identity; use --generate-identity.");
+        const anyGenerated = this.pool.some((e) => e.generated);
+        const free = this.pool.find((e) => e.generated && !e.claimed);
+        if (!free) {
+          // Distinguish "no on-ramp configured" from "pool exhausted" so the
+          // browser can tell the operator what to change.
+          const code = anyGenerated ? "COMPANION_NO_FREE_IDENTITY" : "COMPANION_IDENTITY_DISABLED";
+          fail(
+            code,
+            anyGenerated
+              ? "Every generated identity is in use; run the companion with --players N for more."
+              : "This companion did not generate an identity; use --generate-identity.",
+          );
           return;
         }
+        free.claimed = true;
         this.send(browser, "IDENTITY", {
-          privateKey: generated.privateKey,
-          publicKey: generated.publicKey,
+          privateKey: free.privateKey,
+          publicKey: free.publicKey,
           generated: true,
         });
         return;
       }
-      if (["HELLO", "AUTH_RESPONSE"].includes(message.type) && message.payload.pubkey !== this.config.playerId) {
-        fail("COMPANION_KEY_MISMATCH", "The companion only serves its configured poker identity.");
+      if (message.type === "HELLO") authenticated = false;
+      if (
+        ["HELLO", "AUTH_RESPONSE"].includes(message.type) &&
+        !this.pool.some((e) => e.publicKey === message.payload.pubkey)
+      ) {
+        fail("COMPANION_KEY_MISMATCH", "The companion only serves its configured poker identities.");
         return;
       }
-      if (message.type === "HELLO") authenticated = false;
+      if (message.type === "HELLO") {
+        connectionPlayer = String(message.payload.pubkey ?? "");
+        const member = this.pool.find((e) => e.publicKey === connectionPlayer);
+        if (member) member.claimed = true;
+        this.browserPlayers.set(browser, connectionPlayer);
+      }
       if (!upstream) {
         if (
           message.type !== "HELLO" ||
-          message.payload.pubkey !== this.config.playerId
+          !this.pool.some((e) => e.publicKey === message.payload.pubkey)
         ) {
           fail(
             "COMPANION_KEY_MISMATCH",
@@ -166,7 +255,7 @@ export class PlayerCompanion {
               status: this.config.payInvoices ? "READY" : "OBSERVE_ONLY",
             });
           if (authenticated && incoming.type === "PAYMENT_REQUIRED")
-            this.pay(incoming.payload, browser);
+            this.pay(incoming.payload, browser, connectionPlayer);
         });
         remote.on("error", () =>
           fail(
@@ -203,11 +292,15 @@ export class PlayerCompanion {
       clearTimeout(timer);
       if (upstream?.readyState === WebSocket.CONNECTING) upstream.terminate();
       else upstream?.close();
-      if (this.browser === browser) this.browser = null;
-      if (this.upstream === upstream) this.upstream = null;
+      this.browsers.delete(browser);
+      this.browserPlayers.delete(browser);
     });
   }
-  private pay(payload: Record<string, unknown>, browser: WebSocket): void {
+  private pay(
+    payload: Record<string, unknown>,
+    browser: WebSocket,
+    connectionPlayer: string,
+  ): void {
     if (
       this.stopped ||
       !this.config.payInvoices ||
@@ -232,6 +325,13 @@ export class PlayerCompanion {
       };
       try {
         await attempt();
+        this.ledger.push({
+          playerId: connectionPlayer,
+          obligationId: id,
+          reason: String(payload.reason ?? ""),
+          amountShannons: String(payload.amountShannons ?? "0"),
+          paidAt: new Date().toISOString(),
+        });
         this.send(browser, "COMPANION_STATUS", {
           status: "PAYMENT_SUBMITTED",
           obligationId: id,
@@ -279,7 +379,7 @@ export class PlayerCompanion {
   }
   async stop(): Promise<void> {
     this.stopped = true;
-    this.browser?.terminate();
+    for (const browser of this.browsers) browser.terminate();
     this.upstream?.terminate();
     await new Promise<void>((resolve) =>
       this.listener ? this.listener.close(() => resolve()) : resolve(),

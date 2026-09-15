@@ -77,9 +77,26 @@ npm run companion -w @fiber-poker/player-agent --   --generate-identity --ensure
 The UI then needs no identity file: "New player? Generate identity via
 companion" populates the tab, and Take a seat joins with the generated key.
 
+## Shared funding node (multiple players, one companion)
+
+One funded fnn node can back several players: run the companion with
+`--generate-identity --players N`. It serves N poker identities — each
+browser connection claims one via the "New player" button (round-robin,
+first come first served; a second tab for the SAME identity is refused,
+since it would replace the player's table session). Every invoice the
+companion pays is recorded in a per-player spend ledger
+(`relay.exportLedger()`): playerId, obligationId, reason, amount, time.
+
+Operator settlement for cash-outs: payouts are keysends TO the shared node
+and are attributed by joining the obligationIds in this ledger against the
+table's event log (every payout obligation carries the player id). Trust
+note (docs/15, unchanged): the funding node can always see payment flow;
+the ledger makes it accountable, not trustworthy.
+
 Options: `--port 8788`, `--web-origin http://localhost:5173`, `--name alice`,
 `--key-dir .data/agents`, `--key-file <exact path>`, `--table <URL>`,
-`--generate-identity`, and `--ensure-capacity-ckb <N>`.
+`--generate-identity`, `--players <N>` (with --generate-identity), and
+`--ensure-capacity-ckb <N>`.
 Default allowed origins are `http://localhost:5173` and `http://127.0.0.1:5173`.
 The listener binds only `127.0.0.1`, checks Origin and the selected player identity,
 and accepts one browser connection at a time. It has no HTTP endpoint to read

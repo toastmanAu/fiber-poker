@@ -258,6 +258,15 @@ All recorded in `docs/fnn-compat.md` ("VERIFIED AGAINST A LIVE NODE"):
       refunded over the channel immediately; open/held → cancelled so it
       can never be paid late. ImmediateFiberSettlement.cancel also
       cancels the actual node invoice now.
+- [x] **Shared funding companion (2026-09-15)**: `--players N` serves N
+      generated identities from one funded node — each browser claims one
+      (round-robin IDENTITY_REQUEST; a second tab for the same identity is
+      refused), and every paid invoice lands in a per-player spend ledger
+      (`exportLedger()`: playerId/obligationId/reason/amount/time). One
+      browser per served identity (a duplicate tab would replace the
+      player's table session). Cash-out attribution = join ledger
+      obligationIds against the table's event log. Tests:
+      tests/integration/onramp.test.ts (4).
 - [ ] Still open on the browser path: missed hole cards ARE replayed, but
       reconnects during the P10 seed phase and hold-mode sessions are not
       specifically rehearsed.

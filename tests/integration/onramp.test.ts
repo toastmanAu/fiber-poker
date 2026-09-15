@@ -134,6 +134,7 @@ it("on-ramp: identity requests are refused when the companion generated nothing"
     await new Promise<void>((resolve) => browser!.once("open", resolve));
     browser.send(JSON.stringify({ type: "IDENTITY_REQUEST", payload: {} }));
     const err = await message(browser, "ERROR");
+    console.log("[diag] error payload:", JSON.stringify(err.payload));
     expect(err.payload).toMatchObject({ code: "COMPANION_IDENTITY_DISABLED" });
   } finally {
     browser?.close();
@@ -187,3 +188,121 @@ it("on-ramp: capacity is provisioned toward the table after WELCOME when short",
     fakeTableServer.close();
   }
 });
+
+it("shared funding: two browsers claim distinct identities and the ledger attributes each payment", async () => {
+  const net = new SimulatedFiberNetwork();
+  const [tableNode, playerNode] = net.addRandomNodes(2, 1_000_000_000_000n);
+  const playerGateway = net.node(playerNode);
+  await playerGateway.openChannel(tableNode, 100n * K);
+
+  // Two generated identities in the pool.
+  const g1 = generateKeyPair((n) => crypto.getRandomValues(new Uint8Array(n)));
+  const g2 = generateKeyPair((n) => crypto.getRandomValues(new Uint8Array(n)));
+  const players = [
+    { privateKey: g1.privateKey, publicKey: g1.publicKey, generated: true },
+    { privateKey: g2.privateKey, publicKey: g2.publicKey, generated: true },
+  ];
+
+  // Fake table: per-connection WELCOME + one real 10 CKB invoice each.
+  const invoices = [
+    net.node(tableNode).createInvoice(10n * K),
+    net.node(tableNode).createInvoice(10n * K),
+  ];
+  const table = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  const connections: WebSocket[] = [];
+  table.on("connection", (socket) => {
+    connections.push(socket);
+    const index = connections.indexOf(socket);
+    socket.on("message", (data) => {
+      const m = JSON.parse(data.toString()) as { type: string };
+      if (m.type === "HELLO") {
+        void invoices[index]!.then(({ paymentHash, invoiceAddress }) => {
+          socket.send(
+            JSON.stringify({
+              type: "WELCOME",
+              payload: { sessionId: "s", tablePubkey: "k", tableId: "t", fiberPeerPubkey: tableNode },
+            }),
+          );
+          socket.send(
+            JSON.stringify({
+              type: "PAYMENT_REQUIRED",
+              payload: {
+                paymentHash,
+                invoiceAddress,
+                amountShannons: (10n * K).toString(),
+                reason: "BET",
+                obligationId: `buyin-${index}`,
+                direction: "PLAYER_TO_TABLE",
+              },
+            }),
+          );
+        });
+      }
+    });
+  });
+  await new Promise<void>((resolve) => table.once("listening", resolve));
+  const address = table.address();
+  if (!address || typeof address === "string") throw new Error();
+
+  const relay = new PlayerCompanion({
+    tableUrl: `ws://127.0.0.1:${address.port}`,
+    playerId: players[0]!.publicKey,
+    gateway: playerGateway,
+    port: 0,
+    allowedOrigins: ["http://localhost:5173"],
+    players,
+    payInvoices: true,
+  });
+  await relay.start();
+
+  const claimed: string[] = [];
+  const sockets: WebSocket[] = [];
+  try {
+    for (let i = 0; i < 2; i++) {
+      const browser = new WebSocket(`ws://127.0.0.1:${relay.port}`, {
+        origin: "http://localhost:5173",
+      });
+      sockets.push(browser);
+      await new Promise<void>((resolve) => browser.once("open", resolve));
+      browser.send(JSON.stringify({ type: "IDENTITY_REQUEST", payload: {} }));
+      const identity = await message(browser, "IDENTITY");
+      const pubkey = String((identity.payload as { publicKey: string }).publicKey);
+      claimed.push(pubkey);
+      browser.send(JSON.stringify({ type: "HELLO", payload: { pubkey } }));
+      // NOTE: no COMPANION_STATUS wait here — WS frames arrive batched, so
+      // the ledger poll below is the authoritative wait.
+    }
+    // Distinct identities per browser.
+    expect(claimed[0]).not.toBe(claimed[1]);
+    expect(new Set(claimed)).toEqual(new Set([g1.publicKey, g2.publicKey]));
+
+    // Per-player ledger: one 10 CKB payment per identity, attributed.
+    const deadline = Date.now() + 15_000;
+    while (relay.exportLedger().length < 2 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (relay.exportLedger().length < 2) {
+      console.log("[diag-shared] ledger:", JSON.stringify(relay.exportLedger()));
+      for (const s of sockets) {
+        const errFrames = [];
+        // surface whatever statuses the browser saw (best effort)
+        void errFrames;
+      }
+      console.log("[diag-shared] invoices paid:", JSON.stringify([
+        await net.node(tableNode).invoiceStatus((await invoices[0]!).paymentHash),
+        await net.node(tableNode).invoiceStatus((await invoices[1]!).paymentHash),
+      ]));
+    }
+    const byPlayer = new Map(relay.exportLedger().map((e) => [e.playerId, e]));
+    expect(byPlayer.size).toBe(2);
+    for (const pid of claimed) {
+      const entry = byPlayer.get(pid)!;
+      expect(entry.amountShannons).toBe((10n * K).toString());
+      expect(entry.reason).toBe("BET");
+    }
+  } finally {
+    for (const s of sockets) s.close();
+    await relay.stop();
+    table.close();
+  }
+}, 30_000);
