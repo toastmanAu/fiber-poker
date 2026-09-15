@@ -527,6 +527,59 @@ $("agent-identity").addEventListener("change", async () => {
       $("identity-status").textContent = String(error);
   }
 });
+// On-ramp: ask the loopback companion for the identity IT generated this
+// run (--generate-identity). The companion only ever serves an identity it
+// created; operator-provided files are never exposed over the wire.
+$("btn-generate-identity").addEventListener("click", () => {
+  const url =
+    $<HTMLInputElement>("ws-url").value.trim() || "ws://127.0.0.1:8788";
+  $<HTMLInputElement>("ws-url").value = url;
+  const request = ++identityRead;
+  $("identity-status").textContent = "Requesting identity from the companion…";
+  let ws: WebSocket | null = new WebSocket(url);
+  const finish = (status: string, identity?: { privateKey: string; publicKey: string }) => {
+    if (request !== identityRead) return;
+    try {
+      ws?.close();
+    } catch {
+      /* already closed */
+    }
+    ws = null;
+    $("identity-status").textContent = status;
+    if (identity) {
+      agentIdentity = parseAgentIdentity(JSON.stringify(identity));
+      $<HTMLButtonElement>("btn-join").disabled = false;
+      $("identity-status").textContent = `Companion-generated identity ${short(
+        agentIdentity.publicKey,
+      )} · kept only in this tab`;
+    }
+  };
+  const timer = setTimeout(() => finish("Companion did not answer (is it running with --generate-identity?)."), 8000);
+  ws.onmessage = (ev) => {
+    try {
+      const m = JSON.parse(String(ev.data)) as { type: string; payload: Record<string, unknown> };
+      if (m.type === "IDENTITY" && m.payload.privateKey && m.payload.publicKey) {
+        clearTimeout(timer);
+        finish("", {
+          privateKey: String(m.payload.privateKey),
+          publicKey: String(m.payload.publicKey),
+        });
+      } else if (m.type === "ERROR") {
+        clearTimeout(timer);
+        finish(String((m.payload as { detail?: string }).detail ?? "companion refused"));
+      }
+    } catch {
+      /* non-JSON frame: ignore */
+    }
+  };
+  ws.onerror = () => {
+    clearTimeout(timer);
+    finish("Companion unreachable — start it and try again.");
+  };
+  ws.onopen = () => {
+    ws?.send(JSON.stringify({ type: "IDENTITY_REQUEST", payload: {} }));
+  };
+});
 $("btn-clear-identity").addEventListener("click", () => {
   identityRead++;
   agentIdentity = undefined;

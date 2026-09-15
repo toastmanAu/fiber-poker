@@ -57,8 +57,29 @@ requests, including buy-ins and bets. Without it, requests remain pending until
 another payer handles them or the table's timeout/failure policy resolves them.
 This remains **DEVNET/TESTNET PLAY VALUE ONLY**.
 
+## New-player on-ramp
+
+Run the companion with:
+
+```sh
+npm run companion -w @fiber-poker/player-agent --   --generate-identity --ensure-capacity-ckb 60 --pay-invoices
+```
+
+- `--generate-identity` creates (or reuses) the player's poker identity and
+  serves it to the loopback browser on request: the web client's
+  "New player? Generate identity via companion" button asks for it over the
+  local socket. Operator-provided identity files are never served this way.
+- `--ensure-capacity-ckb N` makes the companion provision player-side
+  channel capacity toward the table after WELCOME, so the new player can
+  actually pay (rc7 has no post-open funding). The table auto-provisions
+  its own payout side at join (FIBER_POKER_AUTO_CAPACITY).
+
+The UI then needs no identity file: "New player? Generate identity via
+companion" populates the tab, and Take a seat joins with the generated key.
+
 Options: `--port 8788`, `--web-origin http://localhost:5173`, `--name alice`,
-`--key-dir .data/agents`, `--key-file <exact path>`, and `--table <URL>`.
+`--key-dir .data/agents`, `--key-file <exact path>`, `--table <URL>`,
+`--generate-identity`, and `--ensure-capacity-ckb <N>`.
 Default allowed origins are `http://localhost:5173` and `http://127.0.0.1:5173`.
 The listener binds only `127.0.0.1`, checks Origin and the selected player identity,
 and accepts one browser connection at a time. It has no HTTP endpoint to read

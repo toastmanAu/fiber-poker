@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { publicKeyFromPrivate } from "@fiber-poker/protocol";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { generateKeyPair, publicKeyFromPrivate } from "@fiber-poker/protocol";
 import { RealFiberGateway } from "@fiber-poker/fiber-adapter";
 import { PlayerCompanion } from "./companion.ts";
 
@@ -23,10 +23,24 @@ async function main(): Promise<void> {
       arg("key-dir") ?? ".data/agents",
       `${name.replace(/[^a-zA-Z0-9-]/g, "_")}.session.json`,
     );
-  const keys = JSON.parse(readFileSync(keyPath, "utf8")) as {
-    privateKey: string;
-    publicKey: string;
-  };
+  // On-ramp: --generate-identity creates (or reuses) a poker identity for
+  // this player and serves it to the loopback browser on request.
+  const generate = process.argv.includes("--generate-identity");
+  let generatedIdentity: { privateKey: string; publicKey: string } | undefined;
+  let keys: { privateKey: string; publicKey: string };
+  if (generate && !existsSync(keyPath)) {
+    keys = generateKeyPair((n) => crypto.getRandomValues(new Uint8Array(n)));
+    mkdirSync(dirname(keyPath), { recursive: true });
+    writeFileSync(keyPath, JSON.stringify(keys), { mode: 0o600 });
+    generatedIdentity = keys;
+    console.log(`[companion] generated new poker identity: ${keys.publicKey}`);
+  } else {
+    keys = JSON.parse(readFileSync(keyPath, "utf8")) as {
+      privateKey: string;
+      publicKey: string;
+    };
+    if (generate) generatedIdentity = keys; // reuse + serve on request
+  }
   if (
     !/^[0-9a-f]{64}$/.test(keys.privateKey) ||
     publicKeyFromPrivate(keys.privateKey) !== keys.publicKey
@@ -36,11 +50,18 @@ async function main(): Promise<void> {
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error("Invalid companion port.");
   const payInvoices = process.argv.includes("--pay-invoices");
+  const ensureCapacityCkb = Number(arg("ensure-capacity-ckb") ?? 0);
+  const minCapacityShannons =
+    Number.isFinite(ensureCapacityCkb) && ensureCapacityCkb > 0
+      ? BigInt(Math.round(ensureCapacityCkb * 100_000_000))
+      : undefined;
   const companion = new PlayerCompanion({
     tableUrl,
     playerId: keys.publicKey,
     port,
     payInvoices,
+    generatedIdentity,
+    minCapacityShannons,
     gateway: new RealFiberGateway({
       url: fnnUrl,
       authToken: fnnToken,
