@@ -53,13 +53,18 @@ describe("liquidity manager", () => {
     expect(mgr.canStartHand(new Map()).ok).toBe(true);
   });
 
-  it("exposes top-up and rebalance as explicit NOT_IMPLEMENTED operator paths", async () => {
+  it("top-up provisions table-side payout capacity; rebalance stays a future milestone", async () => {
     const net = new SimulatedFiberNetwork();
     const [table, player] = net.addRandomNodes(2, 1000n * CKB);
     await net.node(table).openChannel(player, 100n * CKB);
     const mgr = new LiquidityManager(net.node(table));
     await mgr.refresh([{ playerId: player }]);
-    await expect(mgr.topUp(player, 1n)).rejects.toThrow(/top-up/);
+    // Top-up opens table-funded capacity sized to the request.
+    await mgr.topUp(player, 30n * CKB);
+    await mgr.refresh([{ playerId: player }]);
+    const lq = mgr.snapshot().find((e) => e.playerId === player)!;
+    expect(lq.usableOutbound).toBeGreaterThanOrEqual(30n * CKB);
+    // Rebalance (circular self-payment) remains a future milestone.
     await expect(mgr.rebalance(player, 1n)).rejects.toThrow(/rebalanc/);
     // With no channel binding at all, top-up fails closed as well.
     const bare = new LiquidityManager(net.node(table));

@@ -283,11 +283,6 @@ it("shared funding: two browsers claim distinct identities and the ledger attrib
     }
     if (relay.exportLedger().length < 2) {
       console.log("[diag-shared] ledger:", JSON.stringify(relay.exportLedger()));
-      for (const s of sockets) {
-        const errFrames = [];
-        // surface whatever statuses the browser saw (best effort)
-        void errFrames;
-      }
       console.log("[diag-shared] invoices paid:", JSON.stringify([
         await net.node(tableNode).invoiceStatus((await invoices[0]!).paymentHash),
         await net.node(tableNode).invoiceStatus((await invoices[1]!).paymentHash),

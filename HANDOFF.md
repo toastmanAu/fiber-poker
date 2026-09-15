@@ -267,9 +267,18 @@ All recorded in `docs/fnn-compat.md` ("VERIFIED AGAINST A LIVE NODE"):
       player's table session). Cash-out attribution = join ledger
       obligationIds against the table's event log. Tests:
       tests/integration/onramp.test.ts (4).
-- [ ] Still open on the browser path: missed hole cards ARE replayed, but
-      reconnects during the P10 seed phase and hold-mode sessions are not
-      specifically rehearsed.
+- [x] **Reconnect rehearsals (2026-09-15)**:
+      tests/fiber/reconnect-rehearsal.test.ts covers the last two open
+      scenarios — P10 seed-phase reconnect (dropper sat out via the
+      anti-abort deadline, hand completes, automatic sit-in restores them
+      for the next hand) and hold-mode reconnect (offline player's blinds
+      HELD, timeout policy resolves their turns, holds finalize at
+      settlement, payouts flow over the channel, reconnect + resync shows
+      the settled outcome).
+- [x] **LiquidityManager.topUp implemented (2026-09-15)**: opens
+      table-funded capacity sized amount + 101 CKB occupied margin via
+      ensureCapacity, then refreshes. `rebalance` (circular self-payment)
+      remains a documented future milestone.
 
 ### P4 — persistence hardening on real nodes — ✅ core done (2026-09-11)
 - [x] **Crash/restart cycle with `FileEventStore` against the REAL nodes**

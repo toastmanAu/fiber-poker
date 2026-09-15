@@ -9,7 +9,7 @@
  * current stack. Oversized table-side funding is acceptable on devnet.
  */
 
-import type { FiberGateway, GatewayChannel } from "@fiber-poker/fiber-adapter";
+import { ensureCapacity, type FiberGateway, type GatewayChannel } from "@fiber-poker/fiber-adapter";
 import type { Shannon } from "@fiber-poker/poker-engine";
 
 export interface PlayerLiquidity {
@@ -88,21 +88,22 @@ export class LiquidityManager {
     return { ok: true };
   }
 
-  /** Operator top-up: fund the table side of a player's channel. */
+  /**
+   * Operator top-up: ensure `amount` of ADDITIONAL table-side payout
+   * capacity toward the player. rc7 has no splice, so this opens a new
+   * table-funded channel sized amount + occupied-capacity margin
+   * (ensureCapacity), then refreshes the view.
+   */
   async topUp(playerId: string, amount: bigint): Promise<void> {
-    // A real top-up opens a new funded channel or uses a splice; V0 keeps an
-    // explicit operator path and refuses to silently continue otherwise.
     if (!this.gateway) return;
-    const lq = this.liquidity.get(playerId);
-    if (!lq?.channelId) throw new Error(`no channel for ${short(playerId)}; cannot top up`);
-    await this.topUpImpl(playerId, amount, lq);
+    const info = this.usableOutboundFor(playerId);
+    if (!info) throw new Error(`no channel for ${short(playerId)}; cannot top up`);
+    // occupied capacity on rc7 native-CKB channels is ~99 CKB per side.
+    await ensureCapacity(this.gateway, info.peer, {
+      min: info.usableOutbound + amount,
+      openFunding: amount + 101n * 100_000_000n,
+    });
     await this.refresh([{ playerId }]);
-  }
-
-  private async topUpImpl(_playerId: string, _amount: bigint, _lq: PlayerLiquidity): Promise<void> {
-    throw new Error(
-      "NOT_IMPLEMENTED: operator top-up requires a funded channel open/splice against the pinned FNN build; use oversized channel funding on devnet (docs/04)",
-    );
   }
 
   /**
