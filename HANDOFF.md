@@ -24,11 +24,13 @@ the project stands, how to reach the live test environment, and what remains.
 | **Multi-hand live session** | ✅ top-up + dual cash-out live (details §3.6) |
 | **Six-agent live demo** | ✅ full table behind one player node, live (details §3.7) |
 | **Hold-mode live session** | ✅ hold-at-bet → settle-at-hand-end on rc7 (details §3.8) |
+| **Watchtower live validation** | ✅ built-in tower + force-close lifecycle on real nodes (§3.9) |
+| **Multiparty-seed live run** | ✅ P10 commit/reveal deal with real settlements (§3.10) |
 
-Suite: **123 pass + 12 gated-skip (vitest; live tests run only with env
-vars)** plus the Playwright browser specs (sim companion spec green; the
-live companion rehearsal is env-gated). Typecheck clean. Committed and
-pushed through the P3 completion (browser companion + live rehearsal).
+Suite: **128 pass + 14 gated-skip (vitest; live tests run only with env
+vars)** plus the Playwright browser specs (sim + live companion specs).
+Typecheck clean. Committed and pushed through the P3 polish + live
+validations (watchtower, multiparty-seed).
 
 Run everything from `~/fiber-poker/fiber-poker`:
 
@@ -293,6 +295,33 @@ capacity (the liquidity gate refuses joins). Sessions need BOTH
 directions: `tests/fiber/helpers/live-topology.ts`
 (`ensureSessionCapacity`) opens compensating channels per direction; all
 four live session suites call it before joining.
+
+### P6 — live gap validation — ✅ DONE (2026-09-15)
+- [x] **Watchtower / force-close live** (`tests/fiber/live-watchtower.test.ts`):
+      both nodes run fnn's BUILT-IN watchtower (no config overrides → 60s
+      check interval). It is healthy: 4 transport errors in September vs a
+      25.6k-error June outage burst (public-RPC flakiness). The Watchtower
+      RPC module needs the channel's settlement Privkey — not exercisable
+      without key material. LIVE force-close exercised end to end:
+      accepted instantly, both nodes reached `Closed` with balances
+      settled on-chain within minutes; the counterparty's state view
+      lagged ~20 min behind the closer's (watchtower-relevant window).
+      The stale-commitment PUNISHMENT path is not RPC-stageable (fnn
+      force-closes with its latest commitment by construction) — would
+      need crafted on-chain settlement keys. Details in
+      docs/fnn-compat.md §8.
+- [x] **Multiparty-seed live** (`tests/fiber/live-multiparty-seed.test.ts`):
+      P10's commit/reveal deck ran against the real nodes — seed
+      commitments collected from both clients over WS, hand dealt from the
+      combined seed, blinds/bets settled for real, DECK_REVEALED broadcast,
+      both seats cashed out. Note: `SeedProtocolCompleted` is only appended
+      when a non-revealer is sat out; honest clients produce
+      SeedProtocolStarted + the deal itself as evidence.
+- Also fixed while validating: RealFiberGateway.openChannel now
+  set-difference-polls so it returns the NEW channel, never a
+  pre-existing one to the same peer (the old behavior returned a pending
+  or unrelated channel and once caused the wrong channel to be closed in
+  a test).
 
 ### P5 — research tracks (documented, no code owed)
 - [ ] P11: benchmark `geometryxyz/mental-poker` on mobile; swap the toy

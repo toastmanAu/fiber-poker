@@ -445,6 +445,29 @@ Keysend alternative (no invoice): `send_payment { target_pubkey, amount, keysend
 
 ## 8. Watchtower in v0.9.0
 
+**LIVE-VERIFIED (2026-09-15, Pi node):** the BUILT-IN watchtower is active
+by default and healthy — it polls its channels continuously. Observations:
+
+- The log (`data/fiber.log`, WARN/ERROR only — fnn logs no INFO there) is
+  dominated by `fnn::watchtower::actor: Failed to get transactions: http
+  error` against the public RPC: 25.6k of the 26.6k errors are a June
+  outage burst; September has 4. Intermittent transport failures under
+  load, not a hard misconfiguration.
+- The Watchtower RPC module (create_watch_channel etc.) requires the
+  channel's local_settlement_key (Privkey) — it feeds YOUR key material to
+  a tower. It is NOT exercisable against the built-in tower without
+  extracting fnn-internal keys, and we hold no external tower.
+- LIVE force-close (`shutdown_channel {force: true}`) exercised on a real
+  two-sided channel (table 42 / player 59): accepted instantly, channel
+  left the default listing immediately, and BOTH nodes reached `Closed`
+  with balances settled on-chain within minutes. The counterparty node's
+  state lagged the closer's by ~20 minutes (its 60s-interval actor takes a
+  while to reflect an off-its-own-close) — during that window the player
+  side still showed `ChannelReady`. The stale-commitment PUNISHMENT path
+  cannot be staged via RPC (fnn force-closes with its latest commitment by
+  construction); validating it would require crafting an on-chain stale
+  close with settlement keys — out of scope for RPC-level validation.
+
 - **RPC module `Watchtower`**: `create_watch_channel` (`{ channel_id, funding_udt_type_script?, local_settlement_key (Privkey), remote_settlement_key (Pubkey), local_funding_pubkey, remote_funding_pubkey, settlement_data }`), `remove_watch_channel` (`{ channel_id }`), `update_revocation` (`{ channel_id, revocation_data, settlement_data }`), `update_pending_remote_settlement` (`{ channel_id, settlement_data }`), `update_local_settlement` (`{ channel_id, settlement_data }`), `create_preimage` (`{ payment_hash, preimage }`), `remove_preimage` (`{ payment_hash }`). All return `null`. This is an advanced/self-custody API (you hand the watchtower settlement keys/data from your channel state).
 - **Config** (fiber section of config.yml / env / CLI, from `crates/fiber-lib/src/fiber/config.rs`): `watchtower_check_interval_seconds` (default 60; 0 = never), `standalone_watchtower_rpc_url` (use an external watchtower instead of the built-in one), `standalone_watchtower_token` (auth token for the standalone watchtower), `disable_built_in_watchtower` (default false; node requires either a built-in watchtower or a standalone URL).
 - v0.9.0 release notes: watchtower settlement, cleanup, error handling and recovery improvements + "On-chain TLC settlement for force-closed channels".

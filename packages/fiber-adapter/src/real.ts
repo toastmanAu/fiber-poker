@@ -90,6 +90,11 @@ export class RealFiberGateway implements FiberGateway {
     if (fundingAmount < 100n * 100_000_000n) {
       throw new Error("funding below 100 CKB: no spendable balance and peers auto-accept floor blocks it");
     }
+    // Snapshot BEFORE the open: the poll below must return the NEW
+    // channel, never a pre-existing one to the same peer (live-verified
+    // footgun: returning an old channel silently force-closes/deletes the
+    // wrong channel downstream).
+    const beforeIds = new Set((await this.rpc.listChannels({})).channels.map((c) => c.channel_id));
     const { temporary_channel_id } = await this.rpc.openChannel({
       peer_id: peerPubkey,
       pubkey: peerPubkey, // rc7 requires both fields
@@ -105,7 +110,9 @@ export class RealFiberGateway implements FiberGateway {
     const deadline = Date.now() + 120_000;
     for (;;) {
       const { channels } = await this.rpc.listChannels({});
-      const mine = channels.find((c) => c.pubkey === peerPubkey && c.state.state_name !== "Closed");
+      const mine = channels.find(
+        (c) => c.pubkey === peerPubkey && c.state.state_name !== "Closed" && !beforeIds.has(c.channel_id),
+      );
       if (mine) return { channelId: mine.channel_id };
       if (Date.now() > deadline) {
         // Stalled open (rc7 pins below-floor or underfunded-acceptor opens
