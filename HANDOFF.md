@@ -323,14 +323,28 @@ four live session suites call it before joining.
   or unrelated channel and once caused the wrong channel to be closed in
   a test).
 
-### P5 — research tracks (documented, no code owed)
-- [ ] P11: benchmark `geometryxyz/mental-poker` on mobile; swap the toy
-      Pohlig–Hellman cipher for a 2048-bit safe prime behind the same
-      `MentalPokerDeal` interface; add Bayer–Groth proofs at the
-      `PROOF:` seams.
-- [ ] P12: CKB adjudicator script (~300 lines mirroring
-      `PokerChannelSim.adjudicate`); Perun evaluation checklist in
-      `docs/poker-channel-research.md`.
+### P5 — research tracks — partially delivered (2026-09-15)
+- [x] P11 (crypto hardening): the Pohlig–Hellman cipher now runs over a
+      fixed, Miller-Rabin verified 2048-bit SAFE prime
+      (`SAFE_PRIME_2048` in the deck package; re-verified in
+      `tests/fiber/mental-poker-hardening.test.ts`), and exponents are
+      hash-derived 512-bit odd values (the old seed-scan produced
+      brute-forceable exponents). Benchmark: a full 52-card 2-player deal
+      costs ~6s in Node/V8 — fine per-hand on desktop, expect 2-5× on
+      mobile; on-device measurement still pending.
+- [x] P12 (adjudicator): `contracts/poker-channel-adjudicator/` — a no_std
+      Rust lock script (ckb-std + libsecp256k1 recovery + blake2b) that
+      mirrors `PokerChannelSim.adjudicate` rule-for-rule (co-signatures,
+      conservation, sequence monotonicity, finalize payouts). COMPILES for
+      riscv64imac (CKB VM). RESEARCH GRADE: unaudited, not deployed, low-s
+      normalization pending. Build + layouts in the contract README.
+- [ ] P11 (proofs): Bayer–Groth shuffle/decrypt proofs remain OPEN — the
+      PROOF: seams document the wire-in points; the transcript already
+      records every intermediate value for post-hoc dispute. Note: a
+      proper Bayer–Groth argument needs a different algebraic setting
+      (Pedersen commitments over a prime-order group) than the
+      Pohlig–Hellman cipher provides — design work first, not a drop-in.
+- [ ] P11 (mobile): on-device benchmark pending (V8 numbers recorded).
 
 ---
 

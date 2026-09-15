@@ -1,0 +1,25 @@
+[package]
+name = "poker-channel-adjudicator"
+version = "0.1.0"
+edition = "2021"
+description = "CKB lock script adjudicating the poker state channel's co-signed allocations (P12 research prototype; mirrors PokerChannelSim.adjudicate)"
+
+[dependencies]
+ckb-std = "0.16"
+blake2 = { version = "0.10", default-features = false }
+secp256k1 = { version = "0.7", default-features = false, features = ["static-context"], package = "libsecp256k1" }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+codegen-units = 1
+overflow-checks = false
+strip = true
+
+[profile.dev]
+panic = "abort"
+opt-level = 0
+
+[[bin]]
+name = "poker-channel-adjudicator"
+path = "src/main.rs"

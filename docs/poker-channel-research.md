@@ -65,6 +65,11 @@ What a real deployment adds, in build order:
    secp256k1 sighash-all style), conservation, and sequence monotonicity
    against the cell's stored sequence. This is the ~300-line script the
    simulator's `adjudicate` mirrors.
+   **Drafted (2026-09-15)**: `contracts/poker-channel-adjudicator/` — a
+   no_std Rust lock script (ckb-std + libsecp256k1 recovery + blake2b)
+   implementing update/finalize exactly as the simulator's rules; compiles
+   for riscv64imac (CKB VM). RESEARCH GRADE: unaudited, no devnet
+   deployment, low-s normalization pending — see the contract's README.
 3. **Challenge window**: real chains need a timed dispute window instead of
    instant acceptance; the simulator's `disputeLog` shows exactly where
    timeout semantics attach.

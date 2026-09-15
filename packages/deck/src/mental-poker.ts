@@ -1,11 +1,13 @@
 /**
  * P11 mental-poker RESEARCH PROTOTYPE (docs/08 V2).
  *
- * RESEARCH GRADE — NOT PRODUCTION CRYPTO:
- *  - the Pohlig–Hellman commutative cipher is real arithmetic, but the prime
- *    is a constructor parameter; the small toy prime used in tests is
- *    trivially breakable. A production deployment would use a 2048-bit+ safe
- *    prime (slow but sound for this cipher).
+ * The Pohlig–Hellman commutative cipher runs over a fixed, Miller-Rabin
+ * verified 2048-bit SAFE prime (SAFE_PRIME_2048; generated with OpenSSL's
+ * DH safe-prime generator and re-verified in tests) — exponents are
+ * hash-derived 512-bit values, so the discrete-log assumption applies.
+ * The small TOY_PRIME remains for fast tests only.
+ *
+ * STILL RESEARCH GRADE:
  *  - the classic strip-and-deal protocol below does NOT include zero-knowledge
  *    proofs. In Barnett–Smart-style protocols, every shuffle and decrypt-share
  *    carries a Bayer–Groth proof so peers can verify nobody peeked or
@@ -18,6 +20,7 @@
  * the table can feed to the engine like any other DeckService.
  */
 
+import { ckbHash } from "@fiber-poker/protocol";
 import { DECK_SIZE } from "@fiber-poker/poker-engine";
 
 /** Square-and-multiply modular exponentiation over BigInt. */
@@ -91,17 +94,73 @@ function gcd(a: bigint, b: bigint): bigint {
  */
 export const TOY_PRIME = 2147483647n;
 
-/** Deterministic keypair from a seed for reproducible tests. */
+/**
+ * Production group: a fixed 2048-bit SAFE prime (p = 2q + 1 with q prime),
+ * generated with OpenSSL's DH safe-prime generator and Miller-Rabin
+ * verified (22 bases) for both p and q; `tests/fiber/mental-poker-hardening
+ * .test.ts` re-verifies primality on every run so the constant cannot rot.
+ */
+export const SAFE_PRIME_2048 =
+  0xa46c75882e0ea9d45d65a6dfe66e409051887ac3ed46b3f20c1fc330b0828b3e2fe5611508efaa4a3b4491e186da5af6c6b73784929dcb7ab8dbabfaf452e5b6cd5f150452e162d31d6fbfb122ad5eff7819a4d19e0ce806c1857c543be3e9c63a71fbd7db6dfe8a5105b2da12b0d10d631c922da87dd28fce5629cbf623855c7769bc644ba18252b58b81d66eac121c7f66a393c382193ffe0c6764f6365910a109e39efd329693630827c4675787b0c44a0cd9387378eaed123cd9b0f90fa4f576aa395bcc7916f4ef2f52f335955d044881bbfd21c2b68e490337adc69a72a2530e6cbca6210bef458f7efde65331bf4510c2afbdd63ee3f59065478c8a37n;
+
+/** Miller-Rabin over BigInt with fixed bases (deterministic; fine for
+ *  verifying an EMBEDDED constant — never for key generation). */
+export function isProbablePrime(n: bigint): boolean {
+  if (n < 2n) return false;
+  for (const a of [2n, 3n, 5n, 7n, 11n, 13n, 17n, 19n, 23n, 29n, 31n, 37n]) {
+    if (n % a === 0n) return n === a;
+  }
+  let d = n - 1n;
+  let r = 0n;
+  while (d % 2n === 0n) {
+    d /= 2n;
+    r += 1n;
+  }
+  witness: for (const a of [2n, 3n, 5n, 7n, 11n, 13n, 17n, 19n, 23n, 29n, 31n, 37n]) {
+    let x = modPow(a, d, n);
+    if (x === 1n || x === n - 1n) continue;
+    for (let i = 1n; i < r; i++) {
+      x = (x * x) % n;
+      if (x === n - 1n) continue witness;
+    }
+    return false;
+  }
+  return true;
+}
+
+/** q = (p-1)/2 of a safe prime. */
+export function safePrimeCofactor(p: bigint): bigint {
+  return (p - 1n) / 2n;
+}
+
+/**
+ * Deterministic keypair from a seed, safe at any prime size: the exponent
+ * is expanded from the seed through the protocol hash into a 512-bit ODD
+ * value (a 32-bit seed-derived exponent would be brute-forceable at
+ * 2048-bit modulus sizes), then nudged until coprime to p-1 (expected one
+ * or two steps: p-1 = 2q for the safe prime, so any odd e not divisible
+ * by q works).
+ */
 export function deterministicKeypair(p: bigint, seed: bigint): PohligHellmanCipher {
-  // Find e coprime to p-1 by scanning ODD values upward from a seed-derived
-  // start (p-1 is even, so even candidates can never be coprime to it).
   const phi = p - 1n;
-  let e = (seed % (phi - 3n)) + 2n;
+  let acc = seed.toString(16);
+  let e = 0n;
+  for (let round = 0; round < 16; round++) {
+    const digest = ckbHash(new TextEncoder().encode(`${acc}:${round}`));
+    e = (e << 256n) | BigInt("0x" + toHex(digest));
+  }
+  e = (e % (phi - 3n)) + 2n;
   if (e % 2n === 0n) e += 1n;
   while (gcd(e, phi) !== 1n) {
     e = e + 2n > phi - 1n ? 3n : e + 2n;
   }
   return PohligHellmanCipher.fromPrivateKey(p, e);
+}
+
+function toHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
 }
 
 export interface MentalPokerEvent {
@@ -135,8 +194,8 @@ export class MentalPokerDeal {
 
   constructor(
     readonly playerIds: string[],
-    /** Cryptographic parameters (inject a real safe prime for production). */
-    private readonly prime: bigint = TOY_PRIME,
+    /** Cryptographic parameters (TOY_PRIME for fast tests only). */
+    private readonly prime: bigint = SAFE_PRIME_2048,
     keypairs?: Map<string, PohligHellmanCipher>,
   ) {
     if (playerIds.length < 2) throw new Error("mental poker needs at least 2 players");
