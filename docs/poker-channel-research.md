@@ -93,6 +93,28 @@ What a real deployment adds, in build order:
 Do not fork Perun before a minimal poker-channel state machine has been
 simulated off-chain — which is exactly what `PokerChannelSim` now is.
 
+## Mental poker hardening status (P11, 2026-09-15)
+
+- The Pohlig-Hellman cipher now runs over a fixed 2048-bit SAFE prime
+  (`SAFE_PRIME_2048`, Miller-Rabin re-verified in the hardening test) with
+  hash-derived 512-bit exponents. Benchmark: full 52-card 2-player deal
+  **5.9s in Node / 2.0s in Chromium** (modexp-bound).
+- **Secret shuffle fixed**: the prototype derived the per-player shuffle
+  permutation from the PUBLIC player id (`seedOf(id)`) — the entire deal
+  order was computable by anyone. The permutation now derives from the
+  player's PRIVATE exponent (deterministic per player, unpredictable to
+  others).
+- **Negative result (shuffle proofs)**: naive Fiat-Shamir product batching
+  (∏ after^{x^i} = (∏ before^{x^j})^e) is mathematically incorrect — an
+  honest shuffle FAILS the verifier because the input-side product needs
+  the (secret) permutation. Moreover, a substituting prover can generally
+  satisfy the products by absorbing the difference into a garbage element
+  (x^N is invertible mod p-1 in the common case). The composition still
+  catches such decks at deal time (invalid plaintext → abort, dealTo).
+  Sound shuffle proofs for secret-exponent exponentiation ciphers need
+  permutation-commitment constructions (Peng et al./Bayer-Groth style) —
+  design work, not a drop-in.
+
 ## Open problems
 
 1. **Lazy co-signing**: a participant offline at hand end cannot co-sign;

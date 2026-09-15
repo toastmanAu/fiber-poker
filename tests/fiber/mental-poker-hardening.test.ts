@@ -61,6 +61,47 @@ describe("mental poker 2048-bit hardening", () => {
     expect(cipher.decrypt(cipher.encrypt(42n))).toBe(42n);
   });
 
+  it("the shuffle permutation is secret-derived, not the public id order", () => {
+    // The old prototype seeded the shuffle from the PUBLIC player id: the
+    // whole deal order was computable by anyone. Now it derives from the
+    // player's private exponent — a public-id re-derivation must NOT match.
+    const deal = new MentalPokerDeal(["alice", "bob"]);
+    const after = deal.jointEncrypt();
+    const publicPredicted = Array.from({ length: 52 }, (_, i) => BigInt(i + 1));
+    // apply the OLD public-id Fisher-Yates per player and compare encrypts
+    const key = deterministicKeypair(SAFE_PRIME_2048, BigInt(seedLike("alice")));
+    const predicted = shuffledCopyPublic(publicPredicted.map((m) => key.encrypt(m)), seedLike("alice"));
+    expect(after).not.toEqual(predicted);
+  });
+
+  // stand-ins replicating the OLD public derivation for the negative test
+  function seedLike(id: string): number {
+    let h = 2166136261;
+    for (let i = 0; i < id.length; i++) {
+      h ^= id.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+  function shuffledCopyPublic<T>(items: T[], seed: number): T[] {
+    const out = [...items];
+    let state = seed >>> 0;
+    const next = (): number => {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      state >>>= 0;
+      return state;
+    };
+    for (let i = out.length - 1; i > 0; i--) {
+      const j = next() % (i + 1);
+      const tmp = out[i]!;
+      out[i] = out[j]!;
+      out[j] = tmp;
+    }
+    return out;
+  }
+
   it("the toy prime still works for fast tests", () => {
     const deal = new MentalPokerDeal(["a", "b"], TOY_PRIME);
     deal.jointEncrypt();

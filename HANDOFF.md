@@ -329,9 +329,17 @@ four live session suites call it before joining.
       (`SAFE_PRIME_2048` in the deck package; re-verified in
       `tests/fiber/mental-poker-hardening.test.ts`), and exponents are
       hash-derived 512-bit odd values (the old seed-scan produced
-      brute-forceable exponents). Benchmark: a full 52-card 2-player deal
-      costs ~6s in Node/V8 — fine per-hand on desktop, expect 2-5× on
-      mobile; on-device measurement still pending.
+      brute-forceable exponents). Benchmarks: full 52-card 2-player deal
+      5.9s Node / 2.0s Chromium (`browser/benchmark.spec.ts`).
+- [x] P11 (shuffle secrecy fix): the prototype's per-player shuffle
+      permutation was derived from the PUBLIC player id — the entire deal
+      order was computable by anyone. It now derives from the player's
+      PRIVATE exponent. Negative result recorded in
+      docs/poker-channel-research.md: naive product-batching shuffle
+      proofs are mathematically incorrect (honest shuffles fail the
+      verifier; substitution absorbs into garbage that the deal-time
+      plaintext check aborts); sound proofs need permutation-commitment
+      constructions (Peng/BG-style) — design work.
 - [x] P12 (adjudicator): `contracts/poker-channel-adjudicator/` — a no_std
       Rust lock script (ckb-std + libsecp256k1 recovery + blake2b) that
       mirrors `PokerChannelSim.adjudicate` rule-for-rule (co-signatures,

@@ -210,7 +210,11 @@ export class MentalPokerDeal {
     for (const id of this.playerIds) {
       const key = this.keys.get(id)!;
       deck = deck.map((m) => key.encrypt(m));
-      deck = shuffledCopy(deck, seedOf(id));
+      // The shuffle permutation MUST be secret: seed it from the player's
+      // private exponent, not from the public id (the old public seed made
+      // the whole deal order computable by anyone). Deterministic for the
+      // player (reproducible transcript), unpredictable to everyone else.
+      deck = shuffledCopy(deck, secretShuffleSeed(key));
       this.log.push({ playerId: id, action: "shuffle-encrypt", value: "deck" });
     }
     this.pool = deck;
@@ -277,6 +281,19 @@ function seedOf(id: string): number {
     h = Math.imul(h, 16777619);
   }
   return h >>> 0;
+}
+
+/**
+ * Secret shuffle seed: a 32-bit Fisher-Yates state dragged out of the
+ * player's PRIVATE exponent through the protocol hash. Others cannot
+ * compute it (d is secret) and the 2^32 surface is only brute-forceable
+ * offline against the public transcript ordering — production would use a
+ * full keystream (see docs/08 V2 notes).
+ */
+function secretShuffleSeed(key: PohligHellmanCipher): number {
+  const digest = ckbHash(new TextEncoder().encode(`FIBER_POKER/SHUFFLE/SEED/V1:${key.d}`));
+  const hex = [...digest].slice(0, 4).map((b) => b.toString(16).padStart(2, "0")).join("");
+  return Number.parseInt(hex, 16) >>> 0;
 }
 
 /** Deterministic Fisher-Yates for the research prototype's shuffle step. */
