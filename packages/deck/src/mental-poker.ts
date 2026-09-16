@@ -3,9 +3,12 @@
  *
  * The Pohlig–Hellman commutative cipher runs over a fixed, Miller-Rabin
  * verified 2048-bit SAFE prime (SAFE_PRIME_2048; generated with OpenSSL's
- * DH safe-prime generator and re-verified in tests) — exponents are
- * hash-derived 512-bit values, so the discrete-log assumption applies.
- * The small TOY_PRIME remains for fast tests only.
+ * DH safe-prime generator and re-verified in tests). Exponents are
+ * CSPRNG 512-bit values GENERATED PER DEAL — since d = e^{-1} mod (p-1)
+ * and p is public, e must never be derivable by outsiders (a previous
+ * version derived e from the public player id, which handed every player's
+ * decryption key to everyone). The small TOY_PRIME remains for fast tests
+ * only, and `deterministicKeypair` stays exported for reproducible tests.
  *
  * STILL RESEARCH GRADE:
  *  - the classic strip-and-deal protocol below does NOT include zero-knowledge
@@ -184,8 +187,23 @@ export interface MentalPokerEvent {
  *  4. abort(): any player failing to strip marks the deal aborted — the
  *     hand-level policy (fold/redraw) applies above this module.
  */
+/** Fresh CSPRNG keypair — the production path (never public-id derived). */
+export function randomKeypair(p: bigint): PohligHellmanCipher {
+  const bytes = new Uint8Array(64);
+  crypto.getRandomValues(bytes);
+  let e = BigInt("0x" + toHex(bytes)) % (p - 3n) + 2n;
+  if (e % 2n === 0n) e += 1n;
+  while (gcd(e, p - 1n) !== 1n) {
+    e = e + 2n > p - 2n ? 3n : e + 2n;
+  }
+  return PohligHellmanCipher.fromPrivateKey(p, e);
+}
+
 export class MentalPokerDeal {
   private readonly keys = new Map<string, PohligHellmanCipher>();
+  /** card index -> group element (hash-derived; never the raw integer). */
+  private readonly cardElements: bigint[] = [];
+  private readonly cardByElement = new Map<string, number>();
   private pool: bigint[] = [];
   private readonly dealt = new Map<string, number[]>();
   private readonly log: MentalPokerEvent[] = [];
@@ -200,13 +218,26 @@ export class MentalPokerDeal {
   ) {
     if (playerIds.length < 2) throw new Error("mental poker needs at least 2 players");
     for (const id of playerIds) {
-      this.keys.set(id, keypairs?.get(id) ?? deterministicKeypair(this.prime, BigInt(seedOf(id))));
+      // Keys are CSPRNG per deal. Deterministic keys derived from public
+      // ids would hand every player's decryption key to everyone (d is
+      // computable from a public e and the public p - 1).
+      this.keys.set(id, keypairs?.get(id) ?? randomKeypair(this.prime));
+    }
+    // Card ELEMENTS: hash-derived group members. Raw integers 1..52 are
+    // structurally broken in (Z/pZ)* — m = 1 encrypts to the constant 1
+    // under every key (permanently exposed), and small m have degenerate
+    // sub-order structure that leaks under arbitrary exponents.
+    for (let i = 0; i < DECK_SIZE; i++) {
+      const element = BigInt("0x" + toHex(ckbHash(new TextEncoder().encode(`FIBER_POKER/CARD/V1:${i}`)))) % this.prime;
+      if (element === 0n || element === 1n) throw new Error("card element degenerate; regenerate prime");
+      this.cardElements.push(element);
+      this.cardByElement.set(this.cardElements[i]!.toString(), i);
     }
   }
 
   /** Phase 1: everyone encrypts + shuffles, in player order. */
   jointEncrypt(): bigint[] {
-    let deck: bigint[] = Array.from({ length: DECK_SIZE }, (_, i) => BigInt(i + 1)); // group elements 1..52
+    let deck: bigint[] = [...this.cardElements];
     for (const id of this.playerIds) {
       const key = this.keys.get(id)!;
       deck = deck.map((m) => key.encrypt(m));
@@ -239,15 +270,15 @@ export class MentalPokerDeal {
       this.log.push({ playerId: other, action: "strip-for", value: value.toString() });
     }
     const recipient = this.keys.get(playerId)!;
-    const plaintext = recipient.decrypt(value);
-    this.log.push({ playerId, action: "claim", value: plaintext.toString() });
+    const element = recipient.decrypt(value);
+    this.log.push({ playerId, action: "claim", value: element.toString() });
 
-    if (plaintext < 1n || plaintext > BigInt(DECK_SIZE)) {
+    const cardIndex = this.cardByElement.get(element.toString());
+    if (cardIndex === undefined) {
       this.aborted = true;
       this.abortReason = `invalid plaintext from pool at ${card}`;
       throw new Error(this.abortReason);
     }
-    const cardIndex = Number(plaintext) - 1;
     const hand = this.dealt.get(playerId) ?? [];
     hand.push(cardIndex);
     this.dealt.set(playerId, hand);

@@ -345,10 +345,12 @@ four live session suites call it before joining.
 - [x] P11 (crypto hardening): the Pohlig–Hellman cipher now runs over a
       fixed, Miller-Rabin verified 2048-bit SAFE prime
       (`SAFE_PRIME_2048` in the deck package; re-verified in
-      `tests/fiber/mental-poker-hardening.test.ts`), and exponents are
-      hash-derived 512-bit odd values (the old seed-scan produced
-      brute-forceable exponents). Benchmarks: full 52-card 2-player deal
-      5.9s Node / 2.0s Chromium (`browser/benchmark.spec.ts`).
+      `tests/fiber/mental-poker-hardening.test.ts`). Exponents are
+      CSPRNG per deal, 512-bit odd values. Cards are hash-derived group
+      ELEMENTS (the raw 1..52 integer encoding was structurally broken:
+      m=1 encrypts to the constant 1 under every key; small m leak
+      sub-order structure). Benchmarks: full 52-card 2-player deal
+      3.5-5.9s Node / 2.0s Chromium (`browser/benchmark.spec.ts`).
 - [x] P11 (shuffle secrecy fix): the prototype's per-player shuffle
       permutation was derived from the PUBLIC player id — the entire deal
       order was computable by anyone. It now derives from the player's

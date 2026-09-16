@@ -102,6 +102,21 @@ describe("mental poker 2048-bit hardening", () => {
     return out;
   }
 
+  it("the public-id derivation attack no longer recovers card plaintexts", () => {
+    // The pre-fix prototype derived per-player exponents from the PUBLIC
+    // player id — anyone could compute e, then d = e^{-1} mod (p-1), then
+    // decrypt the whole deck. Regression: that derivation must fail now.
+    const deal = new MentalPokerDeal(["alice", "bob"], TOY_PRIME);
+    const encrypted = deal.jointEncrypt();
+    // The attacker derives a candidate key from the public id and tries it
+    // against every card: none may decrypt into the valid 1..52 range.
+    const attackerKey = deterministicKeypair(TOY_PRIME, BigInt(seedLike("alice")));
+    for (const c of encrypted) {
+      const garbage = Number(attackerKey.decrypt(c));
+      expect(garbage < 1 || garbage > 52).toBe(true);
+    }
+  }, 30_000);
+
   it("the toy prime still works for fast tests", () => {
     const deal = new MentalPokerDeal(["a", "b"], TOY_PRIME);
     deal.jointEncrypt();

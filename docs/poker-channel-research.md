@@ -104,6 +104,14 @@ simulated off-chain — which is exactly what `PokerChannelSim` now is.
   order was computable by anyone. The permutation now derives from the
   player's PRIVATE exponent (deterministic per player, unpredictable to
   others).
+- **Card-element encoding fixed**: the prototype encoded cards as the raw
+  integers 1..52 in (Z/pZ)* — structurally broken: m=1 encrypts to the
+  constant 1 under EVERY key (permanently exposed, unprotectable), and
+  small m have degenerate sub-order structure. Cards are now hash-derived
+  group elements (ckbHash("FIBER_POKER/CARD/V1":i) mod p), dealt back via
+  an element→index map. Exponents are CSPRNG per deal (a previous version
+  derived them from the public player id — handing every decryption key
+  to everyone).
 - **Negative result (shuffle proofs)**: naive Fiat-Shamir product batching
   (∏ after^{x^i} = (∏ before^{x^j})^e) is mathematically incorrect — an
   honest shuffle FAILS the verifier because the input-side product needs
